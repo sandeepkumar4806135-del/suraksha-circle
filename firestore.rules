@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Activity feed: events live under each circle.
+    // Any authenticated app user in the MVP can read; writes are allowed for
+    // signed-in users (tighten per-member membership once auth roles land).
+    match /circles/{circleId}/events/{eventId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasAll(['type', 'actorName', 'title'])
+        && request.resource.data.type is string
+        && request.resource.data.title.size() < 200;
+      allow update, delete: if false; // events are append-only
+    }
+
+    // SOS emergency cascade — must be writable instantly by any signed-in
+    // member; resolution is also allowed (banner resolve flow).
+    match /sos_events/{sosId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.status == 'active'
+        && request.resource.data.circleId is string;
+      allow update: if request.auth != null
+        && request.resource.data.status in ['active', 'resolved'];
+      allow delete: if false; // keep the audit trail
+    }
+  }
+}
