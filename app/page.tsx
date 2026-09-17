@@ -27,6 +27,25 @@ import {
 import ActivityLog from "@/components/ActivityLog";
 import { SosBanner } from "@/components/SosBanner";
 import OfflineBanner from "@/components/OfflineBanner";
+import CircleSwitcher from "@/components/CircleSwitcher";
+import SafeZonesCard from "@/components/SafeZonesCard";
+import VoiceAssistantButton from "@/components/VoiceAssistantButton";
+import WearableMonitorCard from "@/components/WearableMonitorCard";
+import type { WearableAlert } from "@/lib/wearable-monitor";
+import {
+  addSafeZone,
+  removeSafeZone,
+  subscribeToSafeZones,
+  useGeofenceWatcher,
+  type SafeZone,
+} from "@/lib/safe-zones";
+import {
+  loadActiveCircleId,
+  loadJoinedCircles,
+  saveActiveCircleId,
+  saveJoinedCircles,
+  type JoinedCircle,
+} from "@/lib/circle-manager";
 import {
   ACTIVE_CIRCLE_ID,
   pushCircleEvent,
@@ -38,6 +57,7 @@ import {
   type CircleEventType,
   type SosAlert,
 } from "@/lib/circle-events";
+import { type VoiceResult } from "@/lib/voice-assistant";
 import {
   analyzeMessage,
   guardShareText,
@@ -289,7 +309,44 @@ export default function Page() {
   const [toast, setToast] = useState<string | null>(null);
   const [greeting, setGreeting] = useState("Good morning");
   const [dateStr, setDateStr] = useState("");
+  // ---- Multi-circle state (persisted in localStorage) ----
+  const [joinedCircles, setJoinedCircles] = useState<JoinedCircle[]>([]);
+  const [activeCircleId, setActiveCircleId] = useState(ACTIVE_CIRCLE_ID);
+  // ---- Safe zones (geofencing) ----
+  const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Hydrate circle state from localStorage after mount (SSR-safe).
+  // localStorage is unavailable during SSR, so this must run post-hydration.
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    const circles = loadJoinedCircles();
+    setJoinedCircles(circles);
+    setActiveCircleId(loadActiveCircleId(circles));
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, []);
+
+  const handleSelectCircle = (id: string) => {
+    if (id === activeCircleId) return;
+    setActiveCircleId(id);
+    saveActiveCircleId(id);
+    setEvents([]); // clear feed until the new circle's snapshot arrives
+    setSosAlert(null);
+    showToast("Switched circle");
+  };
+
+  const handleJoinCircle = (circle: JoinedCircle) => {
+    setJoinedCircles((cs) => {
+      const next = cs.some((c) => c.id === circle.id) ? cs : [...cs, circle];
+      saveJoinedCircles(next);
+      return next;
+    });
+    setActiveCircleId(circle.id);
+    saveActiveCircleId(circle.id);
+    setEvents([]);
+    setSosAlert(null);
+    showToast(`Joined ${circle.name}`);
+  };
 
   useEffect(() => {
     // Intentional client-only init: server render can't know local time.
@@ -328,19 +385,21 @@ export default function Page() {
 
   // Live activity feed from Firestore (filtered by the active Circle ID),
   // newest first; falls back to demo events when Firebase isn't configured.
+  // Re-subscribes automatically whenever the active circle changes.
   useEffect(() => {
     const unsubscribe = subscribeToCircleEvents(
-      ACTIVE_CIRCLE_ID,
+      activeCircleId,
       (feed) => setEvents(feed),
       () => showToast("⚠️ Live feed unavailable — showing demo activity")
     );
     return unsubscribe;
-  }, []);
+  }, [activeCircleId]);
 
-  // Real-time active SOS listener for the circle
+  // Real-time active SOS listener for the circle.
+  // Re-subscribes automatically whenever the active circle changes.
   useEffect(() => {
     const unsubscribe = subscribeToActiveSos(
-      ACTIVE_CIRCLE_ID,
+      activeCircleId,
       setSosAlert,
       (err) => {
         console.warn("[Suraksha Circle] SOS listener error:", err);
@@ -348,7 +407,7 @@ export default function Page() {
       }
     );
     return unsubscribe;
-  }, []);
+  }, [activeCircleId]);
 
   useEffect(() => {
     if (!sosOpen || sosSent || countdown <= 0) return;
@@ -397,8 +456,37 @@ export default function Page() {
     } catch {
       // storage unavailable (private mode) — check-in still works for this session
     }
-    logEvent("checkin", "Mummy", "Daily check-in", "Safe at Home, Andheri West");
-    showToast("💚 Check-in recorded — family notified");
+        logEvent("checkin", "Mummy", "Daily check-in", "Safe at Home, Andheri West");
+    showToast("Check-in recorded");
+  }
+
+      function handleVoiceCheckIn(result: VoiceResult) {
+    const time = new Date().toLocaleTimeString("en-IN", {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    setCheckedIn(true);
+    setCheckInTime(time);
+    setMembers((ms) =>
+      ms.map((m) =>
+        m.id === "mummy"
+          ? { ...m, detail: "Checked in just now" }
+          : m
+      )
+    );
+    try {
+      window.localStorage.setItem(
+        CHECKIN_KEY,
+        JSON.stringify({ checkedIn: true, time, ts: Date.now() })
+      );
+    } catch {}
+    logEvent(
+      "audio-verification",
+      "Mummy",
+      "Voice check-in: I am safe",
+      `Recognised "${result.transcript}" · verified via voice · ${time}`
+    );
+    showToast("Check-in recorded");
   }
 
   function remindCheckIn() {
@@ -424,18 +512,65 @@ export default function Page() {
     detail?: string,
     active = false
   ) {
-    pushCircleEvent({ circleId: ACTIVE_CIRCLE_ID, type, actorName, title, detail, active }).then(
+    pushCircleEvent({ circleId: activeCircleId, type, actorName, title, detail, active }).then(
       (e) => setEvents((prev) => [e, ...prev])
     );
+  }
+
+  /** Fire-and-forget call to /api/notify-sos — SMS/WhatsApp dispatch happens
+   * server-side (Twilio) or as a simulated console preview when unconfigured. */
+  function notifyEmergencyContacts(raisedByName: string, location: string) {
+    try {
+      void fetch("/api/notify-sos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true, // survive tab switch during the emergency
+        body: JSON.stringify({
+          circleId: activeCircleId,
+          raisedByName,
+          location,
+          recipients: CONTACTS.map((c) =>
+            c.tel.replace("tel:", "").replace(/\s+/g, "")
+          ),
+        }),
+      }).catch(() => undefined);
+    } catch {
+      // dispatch is best-effort; the in-app SOS flow must never break
+    }
   }
 
   function sendSos() {
     setSosSent(true);
     logEvent("sos", "Mummy", "🚨 SOS alert triggered", "Live location shared with circle", true);
     // Firestore-based: write real sos_events doc so the banner appears for everyone in the circle
-    raiseSos(ACTIVE_CIRCLE_ID, "user-0", "Mummy", "Live location shared with circle").then(
+    raiseSos(activeCircleId, "user-0", "Mummy", "Live location shared with circle").then(
       (alert) => setSosAlert(alert)
     );
+    // Background SMS/WhatsApp dispatch via /api/notify-sos (fire-and-forget —
+    // never blocks or fails the in-app emergency flow).
+    notifyEmergencyContacts("Mummy", "B-402 Shanti Apartments, Andheri West, Mumbai");
+  }
+
+  /** Dispatches the real SOS when a wearable fall / abnormal-heart-rate alert
+   * was NOT cancelled within its window. Raises the circle-wide SOS event so
+   * the banner appears for every member, and notifies emergency contacts. */
+  function dispatchWearableSos(alert: WearableAlert) {
+    const title =
+      alert.kind === "fall"
+        ? "🚨 Fall detected by smart wearable"
+        : "🚨 Abnormal heart rate detected";
+    logEvent(
+      alert.kind === "fall" ? "fall-detected" : "abnormal-heart-rate",
+      "Mummy",
+      title,
+      `${alert.detail} · ${alert.heartRate} BPM`,
+      true
+    );
+    raiseSos(activeCircleId, "user-0", "Mummy", alert.detail).then((sos) =>
+      setSosAlert(sos)
+    );
+    notifyEmergencyContacts("Mummy", "B-402 Shanti Apartments, Andheri West, Mumbai");
+    showToast("🚨 Wearable emergency — family alerted");
   }
 
   const isRaisedByMe = sosAlert !== null;
@@ -530,7 +665,15 @@ export default function Page() {
               <span className="text-slate-500">FamilyOS India</span>
             </h1>
           </div>
-          <button
+          <div className="flex shrink-0 items-center gap-2">
+            <CircleSwitcher
+              circles={joinedCircles}
+              activeCircleId={activeCircleId}
+              onSelect={handleSelectCircle}
+              onJoin={handleJoinCircle}
+              elder={isElder}
+            />
+            <button
             onClick={() => setView(isElder ? "family" : "elder")}
             className="flex shrink-0 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm transition hover:bg-slate-100 active:scale-95"
           >
@@ -543,6 +686,7 @@ export default function Page() {
               {isElder ? "Switch to Family Dashboard" : "Switch to Elder Mode"}
             </span>
           </button>
+          </div>
         </div>
       </header>
 
@@ -567,8 +711,9 @@ export default function Page() {
           alert={sosAlert}
           onAcknowledge={acknowledgeSos}
           onResolve={resolveSosAlert}
-          isRaisedByMe={isRaisedByMe}
+                    isRaisedByMe={isRaisedByMe}
           elder={isElder}
+          lang={lang}
         />
         {isElder ? (
           /* ===== ELDER MODE ===== */
@@ -672,6 +817,23 @@ export default function Page() {
               <span className="text-sm font-semibold opacity-90">{t.sosSub}</span>
             </button>
 
+            {/* Voice-activated check-in */}
+            <div className="flex justify-center">
+              <VoiceAssistantButton
+                lang={lang}
+                elder={isElder}
+                onSafeVoice={handleVoiceCheckIn}
+              />
+            </div>
+
+            {/* Wearable monitor & fall detection (Elder Mode) */}
+            <WearableMonitorCard
+              elder={isElder}
+              lang={lang}
+              onDispatch={dispatchWearableSos}
+              onCancel={() => showToast("✅ False alarm cancelled — you are safe")}
+            />
+
             {/* Quick cards */}
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -703,7 +865,7 @@ export default function Page() {
                 {lang === "hi" ? "गतिविधि लॉग देखें" : "View Activity Log"}
               </span>
             </button>
-            {logOpen && <ActivityLog events={events} circleId={ACTIVE_CIRCLE_ID} elder lang={lang} />}
+            {logOpen && <ActivityLog events={events} circleId={activeCircleId} elder lang={lang} />}
 
             <p className="pt-2 text-center text-xs font-medium text-slate-400">
               Suraksha Circle MVP · demo data only
@@ -843,6 +1005,14 @@ export default function Page() {
               </div>
             </section>
 
+            {/* Wearable monitor — family sees Mummy's live band vitals */}
+            <WearableMonitorCard
+              elder={isElder}
+              lang={lang}
+              onDispatch={dispatchWearableSos}
+              onCancel={() => showToast("✅ False alarm cancelled — you are safe")}
+            />
+
             {/* Scam protection */}
             <section className="rounded-3xl border-2 border-violet-200 bg-gradient-to-br from-violet-50 to-fuchsia-50 p-5">
               <div className="flex items-start gap-3">
@@ -866,7 +1036,7 @@ export default function Page() {
             </section>
 
             {/* Activity & History Log */}
-            <ActivityLog events={events} circleId={ACTIVE_CIRCLE_ID} />
+            <ActivityLog events={events} circleId={activeCircleId} />
 
             <p className="pb-2 text-center text-xs font-medium text-slate-400">
               Suraksha Circle MVP · demo data only

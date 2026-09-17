@@ -21,7 +21,12 @@ export type CircleEventType =
   | "share-start"
   | "share-end"
   | "member-added"
-  | "cascade";
+  | "cascade"
+  | "zone-arrival"
+  | "zone-departure"
+  | "audio-verification"
+  | "fall-detected"
+  | "abnormal-heart-rate";
 
 export interface CircleEvent {
   id: string;

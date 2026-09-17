@@ -10,6 +10,7 @@ interface SosBannerProps {
   onResolve: () => void;
   isRaisedByMe: boolean;
   elder: boolean;
+  lang: string;
 }
 
 export function SosBanner({

@@ -5,7 +5,10 @@ import {
   AlertTriangle,
   Car,
   CheckCircle2,
+  HeartPulse,
+  Home,
   MapPin,
+  Mic,
   ShieldCheck,
   Siren,
   UserPlus,
@@ -23,6 +26,11 @@ const EVENT_STYLES: Record<
   "share-end": { icon: Car, chip: "bg-sky-100 text-sky-700" },
   "member-added": { icon: UserPlus, chip: "bg-teal-100 text-teal-700" },
   cascade: { icon: AlertTriangle, chip: "bg-orange-100 text-orange-700" },
+        "zone-arrival": { icon: Home, chip: "bg-violet-100 text-violet-700" },
+  "zone-departure": { icon: MapPin, chip: "bg-amber-100 text-amber-700" },
+  "audio-verification": { icon: Mic, chip: "bg-fuchsia-100 text-fuchsia-700" },
+  "fall-detected": { icon: AlertTriangle, chip: "bg-orange-100 text-orange-700" },
+  "abnormal-heart-rate": { icon: HeartPulse, chip: "bg-rose-100 text-rose-700" },
 };
 
 const LABELS = {
