@@ -94,7 +94,10 @@ export default function SafeZonesCard({
           </p>
         </div>
         <button
+          type="button"
           onClick={() => setAdding((a) => !a)}
+          aria-expanded={adding}
+          aria-label={t.add}
           className={`flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-600 font-extrabold text-white shadow transition hover:bg-emerald-700 active:scale-95 ${
             elder ? "min-h-14 px-5 text-lg" : "min-h-10 px-3.5 text-xs"
           }`}
@@ -120,8 +123,10 @@ export default function SafeZonesCard({
             </span>
             {[100, 200, 500].map((r) => (
               <button
+                type="button"
                 key={r}
                 onClick={() => setRadiusM(r)}
+                aria-pressed={radiusM === r}
                 className={`rounded-full border-2 font-bold transition ${
                   radiusM === r
                     ? "border-emerald-600 bg-emerald-600 text-white"
@@ -133,6 +138,7 @@ export default function SafeZonesCard({
             ))}
           </div>
           <button
+            type="button"
             onClick={handleAdd}
             className={`flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 font-extrabold text-white shadow transition hover:bg-emerald-700 active:scale-[0.98] ${
               elder ? "min-h-16 text-xl" : "min-h-12 text-sm"

@@ -8,7 +8,7 @@ const VERSION = "suraksha-v1";
 const SHELL = `${VERSION}-shell`;
 const ASSETS = `${VERSION}-assets`;
 
-const SHELL_URLS = ["/", "/manifest.json", "/icon.svg", "/icon-maskable.svg"];
+const SHELL_URLS = ["/", "/manifest.json", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -70,7 +70,11 @@ self.addEventListener("fetch", (event) => {
   // Static assets: cache-first.
   if (
     url.pathname.startsWith("/_next/static") ||
-    url.pathname.startsWith("/icon") ||
+    url.pathname === "/icon-192.png" ||
+    url.pathname === "/icon-512.png" ||
+    url.pathname === "/apple-touch-icon.png" ||
+    url.pathname === "/icon.svg" ||
+    url.pathname === "/icon-maskable.svg" ||
     url.pathname === "/manifest.json" ||
     url.hostname.endsWith(".gstatic.com")
   ) {

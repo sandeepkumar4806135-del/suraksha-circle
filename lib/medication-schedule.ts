@@ -159,33 +159,146 @@ export const DEMO_SCHEDULES: ScheduleItem[] = [
   },
 ];
 
-/** Live-subscribes to the circle's reminders; falls back to local then demo. */
-export function subscribeToSchedules(
+import { speakPrompt, type VoiceLang } from "./voice-assistant";
+
+/**
+ * Adds a new medication or appointment schedule item.
+ * Persists to Firestore (when configured) and localStorage immediately.
+ */
+export async function addSchedule(
   circleId: string,
-  onData: (items: ScheduleItem[]) => void,
-  onError?: (err: unknown) => void
-): () => void {
+  item: Omit<ScheduleItem, "id" | "circleId" | "createdAt" | "takenAt" | "status">
+): Promise<ScheduleItem> {
+  const now = Date.now();
+  const schedule: ScheduleItem = {
+    ...item,
+    id: `sched-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    circleId,
+    status: "pending",
+    takenAt: null,
+    createdAt: now,
+  };
+
   const db = getDb();
-  if (!db) {
-    const local = loadLocalSchedules(circleId);
-    onData(local.length ? local : DEMO_SCHEDULES.map((s) => ({ ...s, circleId })));
-    return () => undefined;
-  }
-  const q = query(
-    collection(db, "circles", circleId, "schedules"),
-    orderBy("time", "asc")
-  );
-  return onSnapshot(
-    q,
-    (snap) => {
-      const items = snap.docs.map((d) => normalizeSchedule(circleId, d.id, d.data()));
-      saveLocalSchedules(circleId, items);
-      onData(items);
-    },
-    (err) => {
-      onError?.(err);
-      const local = loadLocalSchedules(circleId);
-      onData(local.length ? local : DEMO_SCHEDULES.map((s) => ({ ...s, circleId })));
+  if (db) {
+    try {
+      await addDoc(collection(db, "circles", circleId, "schedules"), {
+        kind: schedule.kind,
+        name: schedule.name,
+        dosage: schedule.dosage,
+        emoji: schedule.emoji,
+        time: schedule.time,
+        elderName: schedule.elderName,
+        status: "pending",
+        takenAt: null,
+        createdAt: serverTimestamp(),
+      });
+    } catch {
+      // Firestore write failed — keep the local copy
     }
-  );
+  }
+
+  const local = loadLocalSchedules(circleId);
+  local.push(schedule);
+  saveLocalSchedules(circleId, local);
+  return schedule;
+}
+
+/**
+ * Marks a schedule item as taken (or back to pending).
+ * Updates Firestore (when configured) and localStorage immediately.
+ */
+export async function updateScheduleStatus(
+  circleId: string,
+  id: string,
+  status: ScheduleStatus
+): Promise<void> {
+  const local = loadLocalSchedules(circleId);
+  const idx = local.findIndex((s) => s.id === id);
+  if (idx === -1) return;
+
+  const now = Date.now();
+  local[idx] = {
+    ...local[idx],
+    status,
+    takenAt: status === "taken" ? now : null,
+  };
+  saveLocalSchedules(circleId, local);
+
+  const db = getDb();
+  if (db) {
+    try {
+      await updateDoc(doc(db, "circles", circleId, "schedules", id), {
+        status,
+        takenAt: status === "taken" ? serverTimestamp() : null,
+      });
+    } catch {
+      // Firestore write failed — keep the local state
+    }
+  }
+}
+
+/**
+ * Deletes a schedule item from Firestore (when configured) and localStorage.
+ */
+export async function deleteSchedule(circleId: string, id: string): Promise<void> {
+  const local = loadLocalSchedules(circleId);
+  const filtered = local.filter((s) => s.id !== id);
+  saveLocalSchedules(circleId, filtered);
+
+  const db = getDb();
+  if (db) {
+    try {
+      await deleteDoc(doc(db, "circles", circleId, "schedules", id));
+    } catch {
+      // Firestore delete failed — keep the local copy removed
+    }
+  }
+}
+
+/**
+ * Speaks a medication reminder via browser speech synthesis.
+ * Reuses `speakPrompt` from `lib/voice-assistant.ts` — graceful no-op if
+ * the Web Speech API is unavailable (SSR / unsupported browsers).
+ */
+export function speakReminder(text: string, lang: VoiceLang): void {
+  speakPrompt(text, lang);
+}
+
+/**
+ * Returns the next pending schedule item relative to "now", or `null` when
+ * everything is taken / there are no items.
+ *
+ * Ties are broken by document order; times are compared as minutes-since-midnight
+ * with wraparound (a 02:00 dose is "next" after a 23:00 dose on the same day).
+ */
+export function getNextReminderTime(items: ScheduleItem[]): ScheduleItem | null {
+  const now = new Date();
+  const nowMinutes =
+    now.getHours() * 60 + now.getMinutes();
+
+  let next: ScheduleItem | null = null;
+  let nextGap = Infinity;
+
+  for (const item of items) {
+    if (item.status === "taken") continue;
+
+    const parts = item.time.split(":");
+    if (parts.length !== 2) continue;
+    const hour = Number(parts[0]);
+    const minute = Number(parts[1]);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) continue;
+    const itemMinutes = hour * 60 + minute;
+
+    // Minutes until this item's time today (wraps forward if already past).
+    let gap = itemMinutes - nowMinutes;
+    if (gap < 0) gap += 24 * 60;
+
+    if (gap < nextGap) {
+      nextGap = gap;
+      next = item;
+    }
+  }
+
+  return next;
 }
