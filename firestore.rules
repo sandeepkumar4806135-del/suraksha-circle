@@ -65,6 +65,20 @@ service cloud.firestore {
       allow update, delete: if false; // events are append-only
     }
 
+    // Activity trail: audit log lives under each circle, append-only.
+    match /circles/{circleId}/activityLogs/{logId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasAll(['type', 'userId', 'userName', 'message'])
+        && request.resource.data.type in ['check_in', 'check_in_nudge', 'sos_triggered', 'sos_resolved', 'location_started', 'location_stopped', 'place_marked']
+        && request.resource.data.userId is string
+        && request.resource.data.userName is string
+        && request.resource.data.message is string
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() < 300;
+      allow update, delete: if false; // audit trail is append-only
+    }
+
     // Safe zones: circles/{circleId}/safezones/{zoneId}.
     // Create + delete only (no in-app edit path today); validated shape.
     match /circles/{circleId}/safezones/{zoneId} {
@@ -73,6 +87,47 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['name', 'emoji', 'lat', 'lng', 'radiusM'])
         && isValidZone();
       allow update: if false; // no edit path in safe-zones.ts (create + delete only)
+      allow delete: if isSignedIn();
+    }
+
+    // Caretaker / doctor access grants: circles/{circleId}/caretaker_access.
+    // Signed-in family members manage grants (create/revoke). External
+    // caretaker sessions are strictly READ-ONLY elsewhere in these rules —
+    // no rule here (or below) ever grants an external visitor a write path
+    // to sos_events, schedules, safezones or events.
+    match /circles/{circleId}/caretaker_access/{grantId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasAll(['role', 'codeHash', 'visitorName'])
+        && request.resource.data.role in ['doctor', 'caretaker', 'family-admin']
+        && request.resource.data.codeHash is string
+        && request.resource.data.codeHash.size() == 64
+        && request.resource.data.visitorName is string
+        && request.resource.data.visitorName.size() > 0
+        && request.resource.data.visitorName.size() < 120;
+      // Only the revoked flag may change after creation — codes can never be
+      // silently re-targeted at another role or circle.
+      allow update: if isSignedIn()
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.codeHash == resource.data.codeHash;
+      allow delete: if isSignedIn(); // hard-remove on cleanup
+    }
+
+    // FCM Web Push device tokens: circles/{circleId}/push_tokens/{tokenId}.
+    // Any signed-in member may register their device (create/update) or
+    // deregister it (delete). Token docs are never read from the client —
+    // the server lists them via Firestore REST with admin credentials.
+    match /circles/{circleId}/push_tokens/{tokenId} {
+      allow read: if false; // client never needs to read tokens back
+      allow create, update: if isSignedIn()
+        && request.resource.data.keys().hasAll(['token', 'memberName', 'platform'])
+        && request.resource.data.token is string
+        && request.resource.data.token.size() > 0
+        && request.resource.data.token.size() < 512
+        && request.resource.data.memberName is string
+        && request.resource.data.memberName.size() > 0
+        && request.resource.data.memberName.size() < 120
+        && request.resource.data.platform is string;
       allow delete: if isSignedIn();
     }
 

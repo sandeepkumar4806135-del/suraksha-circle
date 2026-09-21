@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -24,18 +24,13 @@ import {
   Users,
   X,
 } from "lucide-react";
-import Link from "next/link";
 import ActivityLog from "@/components/ActivityLog";
-import ActivityLogCard from "@/components/ActivityLogCard";
 import { SosBanner } from "@/components/SosBanner";
 import OfflineBanner from "@/components/OfflineBanner";
 import CircleSwitcher from "@/components/CircleSwitcher";
 import SafeZonesCard from "@/components/SafeZonesCard";
 import VoiceAssistantButton from "@/components/VoiceAssistantButton";
 import WearableMonitorCard from "@/components/WearableMonitorCard";
-import PushNotificationToggle from "@/components/PushNotificationToggle";
-import CaretakerAccessManager from "@/components/CaretakerAccessManager";
-import { subscribeToForegroundPush } from "@/lib/push-notifications";
 import type { WearableAlert } from "@/lib/wearable-monitor";
 import {
   addSafeZone,
@@ -69,7 +64,6 @@ import {
   GUARD_SAMPLES,
   type GuardResult,
 } from "@/lib/message-guard";
-import { logActivity, subscribeToActivityLogs, isCheckInOverdue, DEMO_LAST_CHECKIN_BY_MEMBER, type ActivityLog as ActivityLogEntry } from "@/lib/activity-log";
 
 type ViewMode = "elder" | "family";
 
@@ -82,10 +76,6 @@ type Member = {
   statusLabel: string;
   detail: string;
   avatarClass: string;
-  /** Epoch ms of the member's last check-in (drives overdue detection). */
-  lastCheckInMs: number;
-  /** Epoch ms when the coordinator last sent a nudge (null = never). */
-  lastNudgedMs: number | null;
 };
 
 const FAMILY_MEMBERS: Member[] = [
@@ -93,57 +83,49 @@ const FAMILY_MEMBERS: Member[] = [
     id: "mummy",
     name: "Mummy",
     location: "Andheri West, Mumbai",
-    emoji: "👩",
+    emoji: "ðŸ‘©",
     status: "safe",
     statusLabel: "Safe at Home",
     detail: "Checked in 8:45 AM",
     avatarClass: "bg-rose-100 text-rose-700",
-    lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.mummy,
-    lastNudgedMs: null,
   },
   {
     id: "papa",
     name: "Papa",
     location: "Andheri Office",
-    emoji: "👨",
+    emoji: "ðŸ‘¨",
     status: "safe",
     statusLabel: "At Work",
     detail: "Reached office at 9:20 AM",
     avatarClass: "bg-sky-100 text-sky-700",
-    lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.papa,
-    lastNudgedMs: null,
   },
   {
     id: "grandma",
     name: "Grandma",
     location: "Pune",
-    emoji: "👵",
+    emoji: "ðŸ‘µ",
     status: "attention",
     statusLabel: "Missed daily check-in",
-    detail: "Escalation in progress — calling her phone, then yours",
+    detail: "Escalation in progress â€” calling her phone, then yours",
     avatarClass: "bg-amber-100 text-amber-700",
-    lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.grandma,
-    lastNudgedMs: null,
   },
   {
     id: "brother",
     name: "Brother",
-    location: "Mumbai → Thane",
-    emoji: "👦",
+    location: "Mumbai â†’ Thane",
+    emoji: "ðŸ‘¦",
     status: "travel",
     statusLabel: "Travelling",
-    detail: "Share active for 20 mins · ETA 6:10 PM",
+    detail: "Share active for 20 mins Â· ETA 6:10 PM",
     avatarClass: "bg-violet-100 text-violet-700",
-    lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.brother,
-    lastNudgedMs: null,
   },
 ];
 
 type Contact = { name: string; relation: string; phone: string; tel: string };
 
 const CONTACTS: Contact[] = [
-  { name: "Rahul", relation: "Son · Mumbai", phone: "+91 98200 12345", tel: "tel:+919820012345" },
-  { name: "Priya", relation: "Daughter · Bengaluru", phone: "+91 99870 76543", tel: "tel:+919987076543" },
+  { name: "Rahul", relation: "Son Â· Mumbai", phone: "+91 98200 12345", tel: "tel:+919820012345" },
+  { name: "Priya", relation: "Daughter Â· Bengaluru", phone: "+91 99870 76543", tel: "tel:+919987076543" },
   { name: "Papa", relation: "Andheri Office", phone: "+91 98200 11111", tel: "tel:+919820011111" },
   { name: "Dr. Mehta", relation: "Family Doctor", phone: "+91 98204 55555", tel: "tel:+919820455555" },
 ];
@@ -154,19 +136,19 @@ const MEDICAL = {
   bloodGroup: "B+",
   allergies: ["Penicillin", "Sulfa drugs", "Peanuts"],
   conditions: ["Type 2 Diabetes", "High Blood Pressure"],
-  medications: ["Metformin 500mg — after breakfast", "Amlodipine 5mg — after dinner"],
+  medications: ["Metformin 500mg â€” after breakfast", "Amlodipine 5mg â€” after dinner"],
   hospital: "Lilavati Hospital, Bandra West, Mumbai",
-  doctor: "Dr. Mehta — +91 98204 55555",
-  insurance: "Star Health · Policy SH-4452-8890",
+  doctor: "Dr. Mehta â€” +91 98204 55555",
+  insurance: "Star Health Â· Policy SH-4452-8890",
 };
 
 const CHECKIN_KEY = "suraksha-circle:checkin";
 
 const SOS_SHARE_TEXT =
-  "🚨 SOS EMERGENCY! Mummy needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call her immediately. — Sent via Suraksha Circle";
+  "ðŸš¨ SOS EMERGENCY! Mummy needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call her immediately. â€” Sent via Suraksha Circle";
 
 function checkinShareText(time: string): string {
-  return `✅ Mummy has checked in safely at ${time} via Suraksha Circle — she is safe at home. 🙏`;
+  return `âœ… Mummy has checked in safely at ${time} via Suraksha Circle â€” she is safe at home. ðŸ™`;
 }
 
 const MEMBER_ROLES = ["Mom", "Dad", "Grandparent", "Sibling", "Spouse", "Other"] as const;
@@ -180,58 +162,58 @@ const AVATAR_CYCLE = [
 
 const ELDER_TEXT = {
   en: {
-    langBtn: "हिंदी में देखें",
-    statusTitle: "You are SAFE ✅",
-    statusNote: "B-402 Shanti Apartments, Andheri West, Mumbai — family can see you are okay",
-    statusLocal: "आप सुरक्षित हैं 🙏 · Aap poora surakshit hain",
+    langBtn: "à¤¹à¤¿à¤‚à¤¦à¥€ à¤®à¥‡à¤‚ à¤¦à¥‡à¤–à¥‡à¤‚",
+    statusTitle: "You are SAFE âœ…",
+    statusNote: "B-402 Shanti Apartments, Andheri West, Mumbai â€” family can see you are okay",
+    statusLocal: "à¤†à¤ª à¤¸à¥à¤°à¤•à¥à¤·à¤¿à¤¤ à¤¹à¥ˆà¤‚ ðŸ™ Â· Aap poora surakshit hain",
     lastCheckIn: "Last check-in:",
-    autoAlerts: "🔔 Auto-alerts ON",
-    locationOn: "📍 Location ON",
-    checkTitle: "✅ I’M OKAY",
-    checkSub: "Daily Check-in — one tap and your family is notified",
-    checkDoneTitle: "YOU ARE CHECKED IN ✓",
-    callTitle: "📞 CALL FAMILY",
-    callSub: "Rahul · Priya · Papa — one tap dial",
-    sosTitle: "🚨 SOS EMERGENCY",
+    autoAlerts: "ðŸ”” Auto-alerts ON",
+    locationOn: "ðŸ“ Location ON",
+    checkTitle: "âœ… Iâ€™M OKAY",
+    checkSub: "Daily Check-in â€” one tap and your family is notified",
+    checkDoneTitle: "YOU ARE CHECKED IN âœ“",
+    callTitle: "ðŸ“ž CALL FAMILY",
+    callSub: "Rahul Â· Priya Â· Papa â€” one tap dial",
+    sosTitle: "ðŸš¨ SOS EMERGENCY",
     sosSub: "Alert everyone + share live location",
     healthCard: "My Health Card",
     scamCheck: "Check a Message",
   },
   hi: {
     langBtn: "View in English",
-    statusTitle: "आप सुरक्षित हैं ✅",
-    statusNote: "B-402 शांती अपार्टमेंट्स, अंधेरी पश्चिम, मुंबई — परिवार देख सकता है कि आप ठीक हैं",
-    statusLocal: "You are safe 🙏 · Family ko dikhta hai",
-    lastCheckIn: "आख़िरी चेक-इन:",
-    autoAlerts: "🔔 ऑटो-अलर्ट चालू",
-    locationOn: "📍 लोकेशन चालू",
-    checkTitle: "✅ मैं ठीक हूँ (दैनिक चेक-इन)",
-    checkSub: "एक टैप में परिवार को सूचना मिल जाएगी",
-    checkDoneTitle: "आपने चेक-इन कर लिया ✓",
-    callTitle: "📞 परिवार को कॉल करें",
-    callSub: "राहुल · प्रिया · पापा — एक टैप में कॉल",
-    sosTitle: "🚨 आपातकालीन SOS",
-    sosSub: "सभी को अलर्ट + लाइव लोकेशन शेयर",
-    healthCard: "मेरा स्वास्थ्य कार्ड",
-    scamCheck: "संदेश की जाँच करें (स्कैम गार्ड)",
+    statusTitle: "à¤†à¤ª à¤¸à¥à¤°à¤•à¥à¤·à¤¿à¤¤ à¤¹à¥ˆà¤‚ âœ…",
+    statusNote: "B-402 à¤¶à¤¾à¤‚à¤¤à¥€ à¤…à¤ªà¤¾à¤°à¥à¤Ÿà¤®à¥‡à¤‚à¤Ÿà¥à¤¸, à¤…à¤‚à¤§à¥‡à¤°à¥€ à¤ªà¤¶à¥à¤šà¤¿à¤®, à¤®à¥à¤‚à¤¬à¤ˆ â€” à¤ªà¤°à¤¿à¤µà¤¾à¤° à¤¦à¥‡à¤– à¤¸à¤•à¤¤à¤¾ à¤¹à¥ˆ à¤•à¤¿ à¤†à¤ª à¤ à¥€à¤• à¤¹à¥ˆà¤‚",
+    statusLocal: "You are safe ðŸ™ Â· Family ko dikhta hai",
+    lastCheckIn: "à¤†à¤–à¤¼à¤¿à¤°à¥€ à¤šà¥‡à¤•-à¤‡à¤¨:",
+    autoAlerts: "ðŸ”” à¤‘à¤Ÿà¥‹-à¤…à¤²à¤°à¥à¤Ÿ à¤šà¤¾à¤²à¥‚",
+    locationOn: "ðŸ“ à¤²à¥‹à¤•à¥‡à¤¶à¤¨ à¤šà¤¾à¤²à¥‚",
+    checkTitle: "âœ… à¤®à¥ˆà¤‚ à¤ à¥€à¤• à¤¹à¥‚à¤ (à¤¦à¥ˆà¤¨à¤¿à¤• à¤šà¥‡à¤•-à¤‡à¤¨)",
+    checkSub: "à¤à¤• à¤Ÿà¥ˆà¤ª à¤®à¥‡à¤‚ à¤ªà¤°à¤¿à¤µà¤¾à¤° à¤•à¥‹ à¤¸à¥‚à¤šà¤¨à¤¾ à¤®à¤¿à¤² à¤œà¤¾à¤à¤—à¥€",
+    checkDoneTitle: "à¤†à¤ªà¤¨à¥‡ à¤šà¥‡à¤•-à¤‡à¤¨ à¤•à¤° à¤²à¤¿à¤¯à¤¾ âœ“",
+    callTitle: "ðŸ“ž à¤ªà¤°à¤¿à¤µà¤¾à¤° à¤•à¥‹ à¤•à¥‰à¤² à¤•à¤°à¥‡à¤‚",
+    callSub: "à¤°à¤¾à¤¹à¥à¤² Â· à¤ªà¥à¤°à¤¿à¤¯à¤¾ Â· à¤ªà¤¾à¤ªà¤¾ â€” à¤à¤• à¤Ÿà¥ˆà¤ª à¤®à¥‡à¤‚ à¤•à¥‰à¤²",
+    sosTitle: "ðŸš¨ à¤†à¤ªà¤¾à¤¤à¤•à¤¾à¤²à¥€à¤¨ SOS",
+    sosSub: "à¤¸à¤­à¥€ à¤•à¥‹ à¤…à¤²à¤°à¥à¤Ÿ + à¤²à¤¾à¤‡à¤µ à¤²à¥‹à¤•à¥‡à¤¶à¤¨ à¤¶à¥‡à¤¯à¤°",
+    healthCard: "à¤®à¥‡à¤°à¤¾ à¤¸à¥à¤µà¤¾à¤¸à¥à¤¥à¥à¤¯ à¤•à¤¾à¤°à¥à¤¡",
+    scamCheck: "à¤¸à¤‚à¤¦à¥‡à¤¶ à¤•à¥€ à¤œà¤¾à¤à¤š à¤•à¤°à¥‡à¤‚ (à¤¸à¥à¤•à¥ˆà¤® à¤—à¤¾à¤°à¥à¤¡)",
   },
 } as const;
 
 const GUARD_STYLES = {
   safe: {
-    emoji: "✅",
+    emoji: "âœ…",
     box: "border-emerald-300 bg-emerald-50",
     text: "text-emerald-700",
     bar: "bg-emerald-500",
   },
   moderate: {
-    emoji: "⚠️",
+    emoji: "âš ï¸",
     box: "border-amber-300 bg-amber-50",
     text: "text-amber-700",
     bar: "bg-amber-500",
   },
   high: {
-    emoji: "🚨",
+    emoji: "ðŸš¨",
     box: "border-red-300 bg-red-50",
     text: "text-red-700",
     bar: "bg-red-500",
@@ -322,8 +304,6 @@ export default function Page() {
   const [newRole, setNewRole] = useState<(typeof MEMBER_ROLES)[number]>("Mom");
   const [newCity, setNewCity] = useState("");
   const [events, setEvents] = useState<CircleEvent[]>([]);
-  const [auditLogs, setAuditLogs] = useState<ActivityLogEntry[]>([]);
-  const [sharing, setSharing] = useState(false);
   const [sosAlert, setSosAlert] = useState<SosAlert | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -352,7 +332,6 @@ export default function Page() {
     saveActiveCircleId(id);
     setEvents([]); // clear feed until the new circle's snapshot arrives
     setSosAlert(null);
-    setAuditLogs([]);
     showToast("Switched circle");
   };
 
@@ -400,7 +379,7 @@ export default function Page() {
         );
       }
     } catch {
-      // corrupted storage — ignore and fall back to demo defaults
+      // corrupted storage â€” ignore and fall back to demo defaults
     }
   }, []);
 
@@ -411,17 +390,9 @@ export default function Page() {
     const unsubscribe = subscribeToCircleEvents(
       activeCircleId,
       (feed) => setEvents(feed),
-      () => showToast("⚠️ Live feed unavailable — showing demo activity")
+      () => showToast("âš ï¸ Live feed unavailable â€” showing demo activity")
     );
-    const unsubAudit = subscribeToActivityLogs(
-      activeCircleId,
-      (logs) => setAuditLogs(logs),
-      (err) => console.warn("[Suraksha Circle] Activity log unavailable:", err)
-    );
-    return () => {
-      unsubscribe();
-      unsubAudit();
-    };
+    return unsubscribe;
   }, [activeCircleId]);
 
   // Real-time active SOS listener for the circle.
@@ -437,24 +408,6 @@ export default function Page() {
     );
     return unsubscribe;
   }, [activeCircleId]);
-
-  // Foreground push (app open): show in-app toast for incoming alerts.
-  // Background delivery is handled by /firebase-messaging-sw.js.
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-    let cancelled = false;
-    subscribeToForegroundPush((title, body) => {
-      showToast(`🔔 ${title} — ${body}`);
-    }).then((u) => {
-      if (cancelled) u();
-      else unsubscribe = u;
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     if (!sosOpen || sosSent || countdown <= 0) return;
@@ -483,7 +436,7 @@ export default function Page() {
 
   function closeSos() {
     if (sosSent) {
-      logEvent("sos-resolved", "Mummy", "SOS alert resolved", "Marked safe — alert closed by user");
+      logEvent("sos-resolved", "Mummy", "SOS alert resolved", "Marked safe â€” alert closed by user");
     }
     setSosOpen(false);
     setSosSent(false);
@@ -501,16 +454,9 @@ export default function Page() {
         JSON.stringify({ checkedIn: true, time, ts: Date.now() })
       );
     } catch {
-      // storage unavailable (private mode) — check-in still works for this session
+      // storage unavailable (private mode) â€” check-in still works for this session
     }
         logEvent("checkin", "Mummy", "Daily check-in", "Safe at Home, Andheri West");
-    void logActivity({
-      circleId: activeCircleId,
-      type: "check_in",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "Mummy checked in — I'm Safe",
-    });
     showToast("Check-in recorded");
   }
 
@@ -538,93 +484,24 @@ export default function Page() {
       "audio-verification",
       "Mummy",
       "Voice check-in: I am safe",
-      `Recognised "${result.transcript}" · verified via voice · ${time}`
+      `Recognised "${result.transcript}" Â· verified via voice Â· ${time}`
     );
-    void logActivity({
-      circleId: activeCircleId,
-      type: "check_in",
-      userId: "user-0",
-      userName: "Mummy",
-      message: `Mummy voice check-in — I'm Safe (${time})`,
-    });
     showToast("Check-in recorded");
   }
 
   function remindCheckIn() {
     setMembers((ms) =>
       ms.map((m) =>
-        m.id === "grandma" ? { ...m, detail: "Reminder sent just now — waiting for check-in" } : m
+        m.id === "grandma" ? { ...m, detail: "Reminder sent just now â€” waiting for check-in" } : m
       )
     );
-    showToast("📱 Reminder sent to Grandma (Pune)");
+    showToast("ðŸ“± Reminder sent to Grandma (Pune)");
   }
 
   function triggerCascade() {
     setCascadeOpen(false);
     logEvent("cascade", "Rahul", "Family emergency cascade triggered", "All members alerted with live location");
-    showToast("🚨 Emergency cascade sent to all 4 members");
-  }
-
-  /** Toggles live location sharing and writes the audit-trail entry. */
-  function toggleLocationShare() {
-    const next = !sharing;
-    setSharing(next);
-    logEvent(
-      next ? "share-start" : "share-end",
-      "Mummy",
-      next ? "Live location share started" : "Location share ended",
-      next ? "Andheri West, Mumbai" : "Reached safely"
-    );
-    void logActivity({
-      circleId: activeCircleId,
-      type: next ? "location_started" : "location_stopped",
-      userId: "user-0",
-      userName: "Mummy",
-      message: next
-        ? "Mummy started live location sharing"
-        : "Mummy stopped location sharing",
-    });
-    showToast(next ? "📍 Live location sharing started" : "Location sharing stopped");
-  }
-
-  /** Sends a gentle check-in nudge to an overdue member (audit-logged). */
-  function sendNudge(member: Member) {
-    const now = Date.now();
-    const message =
-      lang === "hi"
-        ? `${member.name} को चेक-इन याद दिलाया 🙏`
-        : `Gentle check-in reminder sent to ${member.name}`;
-    setMembers((ms) =>
-      ms.map((m) => (m.id === member.id ? { ...m, lastNudgedMs: now } : m))
-    );
-    logEvent("cascade", "Rahul", `Nudged ${member.name} to check in`, message);
-    void logActivity({
-      circleId: activeCircleId,
-      type: "check_in_nudge",
-      userId: "coordinator",
-      userName: "Rahul",
-      message,
-    }).then((entry) =>
-      setAuditLogs((prev) => [entry, ...prev].slice(0, 100))
-    );
-    showToast(
-      lang === "hi"
-        ? `${member.name} को याद दिलाया 🙏`
-        : `Reminder sent to ${member.name}`
-    );
-  }
-
-  /** Marks a family place and writes the audit-trail entry. */
-  function markFamilyPlace() {
-    logEvent("checkin", "Mummy", "Family place marked", "🏠 Home — Shanti Apartments");
-    void logActivity({
-      circleId: activeCircleId,
-      type: "place_marked",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "Mummy marked a family place: 🏠 Home",
-    });
-    showToast("📍 Family place marked: Home");
+    showToast("ðŸš¨ Emergency cascade sent to all 4 members");
   }
 
   /** Logs a circle event to Firestore (when configured) and renders it instantly. */
@@ -640,29 +517,7 @@ export default function Page() {
     );
   }
 
-  /** Fire-and-forget call to /api/send-push — fans the emergency Web Push out
-   * to every registered device in the circle via FCM (server-side). Never
-   * blocks or fails the in-app SOS flow. */
-  function notifyCircleDevices(title: string, body: string) {
-    try {
-      void fetch("/api/send-push", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        keepalive: true, // survive tab switch during the emergency
-        body: JSON.stringify({
-          circleId: activeCircleId,
-          title,
-          body,
-          url: "/",
-          tag: "suraksha-sos",
-        }),
-      }).catch(() => undefined);
-    } catch {
-      // dispatch is best-effort; the in-app SOS flow must never break
-    }
-  }
-
-  /** Fire-and-forget call to /api/notify-sos — SMS/WhatsApp dispatch happens
+  /** Fire-and-forget call to /api/notify-sos â€” SMS/WhatsApp dispatch happens
    * server-side (Twilio) or as a simulated console preview when unconfigured. */
   function notifyEmergencyContacts(raisedByName: string, location: string) {
     try {
@@ -686,26 +541,14 @@ export default function Page() {
 
   function sendSos() {
     setSosSent(true);
-    logEvent("sos", "Mummy", "🚨 SOS alert triggered", "Live location shared with circle", true);
-    void logActivity({
-      circleId: activeCircleId,
-      type: "sos_triggered",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "🚨 SOS triggered by Mummy",
-    });
+    logEvent("sos", "Mummy", "ðŸš¨ SOS alert triggered", "Live location shared with circle", true);
     // Firestore-based: write real sos_events doc so the banner appears for everyone in the circle
     raiseSos(activeCircleId, "user-0", "Mummy", "Live location shared with circle").then(
       (alert) => setSosAlert(alert)
     );
-    // Background SMS/WhatsApp dispatch via /api/notify-sos (fire-and-forget —
+    // Background SMS/WhatsApp dispatch via /api/notify-sos (fire-and-forget â€”
     // never blocks or fails the in-app emergency flow).
     notifyEmergencyContacts("Mummy", "B-402 Shanti Apartments, Andheri West, Mumbai");
-    // Web Push to all registered circle devices (also fire-and-forget).
-    notifyCircleDevices(
-      "🚨 SOS EMERGENCY — Mummy needs help",
-      "Mummy triggered an SOS. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Tap to open Suraksha Circle."
-    );
   }
 
   /** Dispatches the real SOS when a wearable fall / abnormal-heart-rate alert
@@ -714,40 +557,29 @@ export default function Page() {
   function dispatchWearableSos(alert: WearableAlert) {
     const title =
       alert.kind === "fall"
-        ? "🚨 Fall detected by smart wearable"
-        : "🚨 Abnormal heart rate detected";
+        ? "ðŸš¨ Fall detected by smart wearable"
+        : "ðŸš¨ Abnormal heart rate detected";
     logEvent(
       alert.kind === "fall" ? "fall-detected" : "abnormal-heart-rate",
       "Mummy",
       title,
-      `${alert.detail} · ${alert.heartRate} BPM`,
+      `${alert.detail} Â· ${alert.heartRate} BPM`,
       true
     );
     raiseSos(activeCircleId, "user-0", "Mummy", alert.detail).then((sos) =>
       setSosAlert(sos)
     );
-    void logActivity({
-      circleId: activeCircleId,
-      type: "sos_triggered",
-      userId: "user-0",
-      userName: "Mummy",
-      message: `🚨 Wearable SOS — ${title}`,
-    });
     notifyEmergencyContacts("Mummy", "B-402 Shanti Apartments, Andheri West, Mumbai");
-    notifyCircleDevices(
-      title,
-      `${alert.detail} — ${alert.heartRate} BPM. Tap to open Suraksha Circle.`
-    );
-    showToast("🚨 Wearable emergency — family alerted");
+    showToast("ðŸš¨ Wearable emergency â€” family alerted");
   }
 
   const isRaisedByMe = sosAlert !== null;
 
   async function acknowledgeSos() {
     const text =
-      "🚨 SOS EMERGENCY! " +
+      "ðŸš¨ SOS EMERGENCY! " +
       (sosAlert?.raisedByName ?? "Family member") +
-      " needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call immediately. — Sent via Suraksha Circle";
+      " needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call immediately. â€” Sent via Suraksha Circle";
     await handleShare(text);
   }
 
@@ -755,15 +587,8 @@ export default function Page() {
     if (!sosAlert) return;
     await resolveSos(sosAlert, "Mummy");
     setSosAlert(null);
-    logEvent("sos-resolved", "Mummy", "SOS alert resolved", "Marked safe — alert resolved by user");
-    void logActivity({
-      circleId: activeCircleId,
-      type: "sos_resolved",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "SOS resolved — Mummy is safe",
-    });
-    showToast("✅ SOS alert resolved — you are safe");
+    logEvent("sos-resolved", "Mummy", "SOS alert resolved", "Marked safe â€” alert resolved by user");
+    showToast("âœ… SOS alert resolved â€” you are safe");
   }
 
   // Native Web Share API with wa.me fallback
@@ -771,14 +596,14 @@ export default function Page() {
     if (typeof navigator !== "undefined" && navigator.share) {
       try {
         await navigator.share({ title: "Suraksha Circle", text });
-        showToast("📤 Shared with your family");
+        showToast("ðŸ“¤ Shared with your family");
       } catch {
-        // user cancelled the native sheet — nothing to do
+        // user cancelled the native sheet â€” nothing to do
       }
       return;
     }
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
-    showToast("💬 Opening WhatsApp to share…");
+    showToast("ðŸ’¬ Opening WhatsApp to shareâ€¦");
   }
 
   function runGuardCheck() {
@@ -801,28 +626,24 @@ export default function Page() {
         id: `member-${Date.now()}`,
         name,
         location: city,
-        emoji: "🧑",
+        emoji: "ðŸ§‘",
         status: "safe",
         statusLabel: "Safe",
-        detail: `Added just now · ${newRole} · awaiting first check-in`,
+        detail: `Added just now Â· ${newRole} Â· awaiting first check-in`,
         avatarClass: AVATAR_CYCLE[ms.length % AVATAR_CYCLE.length],
-        lastCheckInMs: Date.now(),
-        lastNudgedMs: null,
       },
     ]);
-    logEvent("member-added", name, "Added to the circle", `${newRole} · ${city} · status: Safe`);
+    logEvent("member-added", name, "Added to the circle", `${newRole} Â· ${city} Â· status: Safe`);
     setAddOpen(false);
     setNewName("");
     setNewRole("Mom");
     setNewCity("");
-    showToast(`✅ ${name} added to your Suraksha Circle`);
+    showToast(`âœ… ${name} added to your Suraksha Circle`);
   }
 
   const attention = members.filter((m) => m.status === "attention").length;
   const travel = members.filter((m) => m.status === "travel").length;
   const safe = members.length - attention - travel;
-  // Overdue members: last check-in older than 20h (unknown/overdue state).
-  const overdueMembers = members.filter((m) => isCheckInOverdue(m.lastCheckInMs));
   const isElder = view === "elder";
   const t = ELDER_TEXT[lang];
 
@@ -909,8 +730,8 @@ export default function Page() {
               </button>
             </div>
             <h2 className="text-4xl font-extrabold leading-tight tracking-tight text-slate-900">
-              {lang === "hi" ? "नमस्ते" : greeting},{" "}
-              <span className="text-rose-500">Mummy ji</span> <span aria-hidden>❤️</span>
+              {lang === "hi" ? "à¤¨à¤®à¤¸à¥à¤¤à¥‡" : greeting},{" "}
+              <span className="text-rose-500">Mummy ji</span> <span aria-hidden>â¤ï¸</span>
             </h2>
 
             {/* Large localized safety status */}
@@ -964,8 +785,8 @@ export default function Page() {
               <span className="relative px-4 text-center text-sm font-semibold opacity-90">
                 {checkedIn
                   ? lang === "hi"
-                    ? `दैनिक चेक-इन ${checkInTime} बजे पूरा हुआ — परिवार को सूचित किया गया`
-                    : `Daily check-in done at ${checkInTime} — family notified`
+                    ? `à¤¦à¥ˆà¤¨à¤¿à¤• à¤šà¥‡à¤•-à¤‡à¤¨ ${checkInTime} à¤¬à¤œà¥‡ à¤ªà¥‚à¤°à¤¾ à¤¹à¥à¤† â€” à¤ªà¤°à¤¿à¤µà¤¾à¤° à¤•à¥‹ à¤¸à¥‚à¤šà¤¿à¤¤ à¤•à¤¿à¤¯à¤¾ à¤—à¤¯à¤¾`
+                    : `Daily check-in done at ${checkInTime} â€” family notified`
                   : t.checkSub}
               </span>
             </button>
@@ -1006,18 +827,11 @@ export default function Page() {
             </div>
 
             {/* Wearable monitor & fall detection (Elder Mode) */}
-            <PushNotificationToggle
-              circleId={activeCircleId}
-              elder={isElder}
-              lang={lang}
-              memberName="Mummy"
-              onStatusChange={showToast}
-            />
             <WearableMonitorCard
               elder={isElder}
               lang={lang}
               onDispatch={dispatchWearableSos}
-              onCancel={() => showToast("✅ False alarm cancelled — you are safe")}
+              onCancel={() => showToast("âœ… False alarm cancelled â€” you are safe")}
             />
 
             {/* Quick cards */}
@@ -1045,66 +859,16 @@ export default function Page() {
               className="flex min-h-20 w-full items-center gap-3 rounded-3xl border-2 border-slate-200 bg-white px-5 text-left shadow-sm transition hover:border-slate-400 active:scale-[0.98]"
             >
               <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-2xl" aria-hidden>
-                📜
+                ðŸ“œ
               </span>
               <span className="text-xl font-extrabold text-slate-800">
-                {lang === "hi" ? "गतिविधि लॉग देखें" : "View Activity Log"}
+                {lang === "hi" ? "à¤—à¤¤à¤¿à¤µà¤¿à¤§à¤¿ à¤²à¥‰à¤— à¤¦à¥‡à¤–à¥‡à¤‚" : "View Activity Log"}
               </span>
             </button>
             {logOpen && <ActivityLog events={events} circleId={activeCircleId} elder lang={lang} />}
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={toggleLocationShare}
-                className="flex min-h-14 flex-col items-center justify-center gap-1 rounded-3xl border-2 border-sky-200 bg-white p-3 text-center shadow-sm transition hover:border-sky-400 active:scale-[0.98]"
-              >
-                <MapPin className="h-6 w-6 text-sky-600" aria-hidden />
-                <span className="text-sm font-extrabold text-slate-800">
-                  {sharing
-                    ? lang === "hi"
-                      ? "लोकेशन बंद करें"
-                      : "Stop Sharing"
-                    : lang === "hi"
-                      ? "लाइव लोकेशन"
-                      : "Share Location"}
-                </span>
-              </button>
-              <button
-                onClick={markFamilyPlace}
-                className="flex min-h-14 flex-col items-center justify-center gap-1 rounded-3xl border-2 border-violet-200 bg-white p-3 text-center shadow-sm transition hover:border-violet-400 active:scale-[0.98]"
-              >
-                <span className="text-2xl" aria-hidden>
-                  📍
-                </span>
-                <span className="text-sm font-extrabold text-slate-800">
-                  {lang === "hi" ? "जगह जोड़ें" : "Mark Place"}
-                </span>
-              </button>
-            </div>
-            <ActivityLogCard logs={auditLogs} elder lang={lang} />
-
-            <footer className="rounded-3xl border border-slate-200 bg-white p-4 text-center shadow-sm">
-              <p className="text-xs font-semibold text-slate-400">
-                Suraksha Circle MVP · demo data only
-              </p>
-              <p className="mt-1.5 text-xs font-bold text-slate-500">
-                <Link
-                  href="/privacy"
-                  className="underline underline-offset-2 hover:text-emerald-700"
-                >
-                  Privacy Policy
-                </Link>
-                <span aria-hidden> · </span>
-                <Link
-                  href="/terms"
-                  className="underline underline-offset-2 hover:text-emerald-700"
-                >
-                  Terms of Service
-                </Link>
-              </p>
-            </footer>
 
             <p className="pt-2 text-center text-xs font-medium text-slate-400">
-              Suraksha Circle MVP · demo data only
+              Suraksha Circle MVP Â· demo data only
             </p>
           </div>
         ) : (
@@ -1112,7 +876,7 @@ export default function Page() {
           <div className="space-y-4">
             <p className="text-base font-semibold text-slate-500">{dateStr}</p>
             <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">
-              Hi Rahul 👋 <span className="text-slate-400">·</span>{" "}
+              Hi Rahul ðŸ‘‹ <span className="text-slate-400">Â·</span>{" "}
               <span className="text-slate-600">Family Dashboard</span>
             </h2>
 
@@ -1133,7 +897,7 @@ export default function Page() {
                 {attention > 0 ? `${safe} of ${members.length} safe` : "All members safe"}
               </p>
               <p className="mt-1 text-sm font-semibold opacity-90 sm:text-base">
-                Circle: {safe} safe · {travel} travelling · {attention} needs attention
+                Circle: {safe} safe Â· {travel} travelling Â· {attention} needs attention
               </p>
               <button
                 onClick={() => handleShare(checkinShareText(checkInTime))}
@@ -1142,73 +906,6 @@ export default function Page() {
                 <Share2 className="h-5 w-5" aria-hidden /> Share via WhatsApp / SMS
               </button>
             </section>
-
-            {/* Missed check-in / overdue nudges (coordinator view) */}
-            {overdueMembers.length > 0 && (
-              <section
-                aria-label={lang === "hi" ? "छूटे हुए चेक-इन" : "Missed check-ins"}
-                className="rounded-3xl border-2 border-amber-200 bg-gradient-to-br from-amber-50 to-orange-50 p-4 shadow-sm"
-              >
-                <div className="flex items-center gap-2.5 px-1">
-                  <span
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-white"
-                    aria-hidden
-                  >
-                    <BellRing className="h-5 w-5" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-base font-extrabold text-amber-900">
-                      {lang === "hi"
-                        ? `⏰ ${overdueMembers.length} सदस्य का चेक-इन छूटा`
-                        : `⏰ ${overdueMembers.length} missed check-in${overdueMembers.length > 1 ? "s" : ""}`}
-                    </h3>
-                    <p className="text-xs font-semibold text-amber-700">
-                      {lang === "hi"
-                        ? "20 घंटे से कोई चेक-इन नहीं — प्यार से याद दिलाएँ"
-                        : "No check-in for 20+ hours — send a gentle reminder"}
-                    </p>
-                  </div>
-                </div>
-                <ul className="mt-3 space-y-2">
-                  {overdueMembers.map((m) => (
-                    <li
-                      key={m.id}
-                      className="flex items-center gap-3 rounded-2xl border border-amber-200 bg-white p-3 shadow-sm"
-                    >
-                      <span
-                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-xl ${m.avatarClass}`}
-                        aria-hidden
-                      >
-                        {m.emoji}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-extrabold text-slate-900">
-                          {lang === "hi"
-                            ? `${m.name} ने आज चेक-इन नहीं किया। याद दिलाएँ?`
-                            : `${m.name} hasn't checked in today. Send a quick reminder?`}
-                        </p>
-                        <p className="text-xs font-semibold text-slate-400">
-                          {m.lastNudgedMs
-                            ? lang === "hi"
-                              ? "याद दिलाया ✓"
-                              : "Nudged ✓"
-                            : lang === "hi"
-                              ? "अभी तक याद नहीं दिलाया"
-                              : "Not nudged yet"}
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => sendNudge(m)}
-                        className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-full bg-amber-500 px-3.5 py-2 text-xs font-extrabold text-white shadow-sm transition hover:bg-amber-600 active:scale-95"
-                      >
-                        <BellRing className="h-4 w-4" aria-hidden />
-                        {lang === "hi" ? "याद दिलाएँ" : "Send Nudge"}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
 
             {/* Family members list */}
             <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1255,7 +952,7 @@ export default function Page() {
                                 : "bg-sky-100 text-sky-700"
                           }`}
                         >
-                          {m.status === "safe" ? "🟢" : m.status === "attention" ? "⚠️" : "🚗"}{" "}
+                          {m.status === "safe" ? "ðŸŸ¢" : m.status === "attention" ? "âš ï¸" : "ðŸš—"}{" "}
                           {m.statusLabel}
                         </span>
                       </div>
@@ -1308,28 +1005,12 @@ export default function Page() {
               </div>
             </section>
 
-            {/* Push notification opt-in — family sees Mummy's alert settings */}
-            <PushNotificationToggle
-              circleId={activeCircleId}
-              elder={isElder}
-              lang={lang}
-              memberName="Rahul"
-              onStatusChange={showToast}
-            />
-
-            {/* Caretaker / doctor access manager — generate read-only codes */}
-            <CaretakerAccessManager
-              circleId={activeCircleId}
-              lang={lang}
-              onStatusChange={showToast}
-            />
-
-            {/* Wearable monitor — family sees Mummy's live band vitals */}
+            {/* Wearable monitor â€” family sees Mummy's live band vitals */}
             <WearableMonitorCard
               elder={isElder}
               lang={lang}
               onDispatch={dispatchWearableSos}
-              onCancel={() => showToast("✅ False alarm cancelled — you are safe")}
+              onCancel={() => showToast("âœ… False alarm cancelled â€” you are safe")}
             />
 
             {/* Scam protection */}
@@ -1341,7 +1022,7 @@ export default function Page() {
                 <div className="min-w-0 flex-1">
                   <h3 className="text-lg font-extrabold text-violet-900">Scam Protection</h3>
                   <p className="mt-0.5 text-sm font-semibold text-violet-700">
-                    Forward a suspicious WhatsApp/SMS message to check for safety — before anyone
+                    Forward a suspicious WhatsApp/SMS message to check for safety â€” before anyone
                     clicks or pays.
                   </p>
                 </div>
@@ -1356,31 +1037,9 @@ export default function Page() {
 
             {/* Activity & History Log */}
             <ActivityLog events={events} circleId={activeCircleId} />
-            <ActivityLogCard logs={auditLogs} lang={lang} />
-
-            <footer className="rounded-3xl border border-slate-200 bg-white p-4 text-center shadow-sm">
-              <p className="text-xs font-semibold text-slate-400">
-                Suraksha Circle MVP · demo data only
-              </p>
-              <p className="mt-1.5 text-xs font-bold text-slate-500">
-                <Link
-                  href="/privacy"
-                  className="underline underline-offset-2 hover:text-emerald-700"
-                >
-                  Privacy Policy
-                </Link>
-                <span aria-hidden> · </span>
-                <Link
-                  href="/terms"
-                  className="underline underline-offset-2 hover:text-emerald-700"
-                >
-                  Terms of Service
-                </Link>
-              </p>
-            </footer>
 
             <p className="pb-2 text-center text-xs font-medium text-slate-400">
-              Suraksha Circle MVP · demo data only
+              Suraksha Circle MVP Â· demo data only
             </p>
           </div>
         )}
@@ -1408,7 +1067,7 @@ export default function Page() {
             </div>
             <ul className="mt-5 space-y-2 text-left text-sm font-semibold text-slate-700">
               <li className="flex items-center gap-2">
-                <Phone className="h-4 w-4 text-red-600" aria-hidden /> Auto-call Rahul → Priya → Papa
+                <Phone className="h-4 w-4 text-red-600" aria-hidden /> Auto-call Rahul â†’ Priya â†’ Papa
               </li>
               <li className="flex items-center gap-2">
                 <MapPin className="h-4 w-4 text-red-600" aria-hidden /> Share live location with circle
@@ -1427,7 +1086,7 @@ export default function Page() {
               onClick={closeSos}
               className="mt-3 min-h-14 w-full rounded-2xl border-2 border-slate-300 bg-white font-extrabold text-slate-700 transition hover:bg-slate-100 active:scale-[0.98]"
             >
-              I’M FINE — CANCEL SOS
+              Iâ€™M FINE â€” CANCEL SOS
             </button>
           </div>
         ) : (
@@ -1435,13 +1094,13 @@ export default function Page() {
             <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-600 text-white shadow-lg">
               <LifeBuoy className="h-8 w-8 animate-pulse" aria-hidden />
             </span>
-            <p className="mt-3 text-2xl font-black text-red-700">🚨 EMERGENCY ALERT SENT</p>
+            <p className="mt-3 text-2xl font-black text-red-700">ðŸš¨ EMERGENCY ALERT SENT</p>
             <ul className="mt-4 space-y-2 text-left text-sm font-semibold text-slate-700">
-              <li>✅ Rahul notified — phone ringing</li>
-              <li>✅ Priya notified — SMS + call</li>
-              <li>✅ Papa notified — phone ringing</li>
-              <li>✅ Grandma (Pune) notified — SMS</li>
-              <li>📍 Live location shared: Andheri West, Mumbai</li>
+              <li>âœ… Rahul notified â€” phone ringing</li>
+              <li>âœ… Priya notified â€” SMS + call</li>
+              <li>âœ… Papa notified â€” phone ringing</li>
+              <li>âœ… Grandma (Pune) notified â€” SMS</li>
+              <li>ðŸ“ Live location shared: Andheri West, Mumbai</li>
             </ul>
             <button
               onClick={() => handleShare(SOS_SHARE_TEXT)}
@@ -1476,7 +1135,7 @@ export default function Page() {
             <li key={c.name}>
               <a
                 href={c.tel}
-                onClick={() => showToast(`📞 Calling ${c.name}…`)}
+                onClick={() => showToast(`ðŸ“ž Calling ${c.name}â€¦`)}
                 className="flex min-h-16 items-center justify-between gap-3 rounded-2xl border border-slate-200 px-4 py-3 transition hover:border-emerald-400 hover:bg-emerald-50 active:scale-[0.98]"
               >
                 <span>
@@ -1502,7 +1161,7 @@ export default function Page() {
           <div className="rounded-2xl bg-teal-50 p-4">
             <p className="text-base font-extrabold text-slate-900">{MEDICAL.name}</p>
             <p className="text-sm font-semibold text-slate-500">
-              Age {MEDICAL.age} · Andheri West, Mumbai
+              Age {MEDICAL.age} Â· Andheri West, Mumbai
             </p>
           </div>
           <div className="flex items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4">
@@ -1544,17 +1203,17 @@ export default function Page() {
             </p>
             <ul className="mt-2 space-y-1 text-sm font-semibold text-slate-700">
               {MEDICAL.medications.map((m) => (
-                <li key={m}>• {m}</li>
+                <li key={m}>â€¢ {m}</li>
               ))}
             </ul>
           </div>
           <div className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
             <p>
-              🏥 Preferred hospital:{" "}
+              ðŸ¥ Preferred hospital:{" "}
               <span className="font-extrabold text-slate-900">{MEDICAL.hospital}</span>
             </p>
-            <p className="mt-1">🩺 {MEDICAL.doctor}</p>
-            <p className="mt-1">💳 Insurance: {MEDICAL.insurance}</p>
+            <p className="mt-1">ðŸ©º {MEDICAL.doctor}</p>
+            <p className="mt-1">ðŸ’³ Insurance: {MEDICAL.insurance}</p>
           </div>
           <div>
             <p className="text-sm font-extrabold uppercase tracking-wide text-slate-500">
@@ -1568,7 +1227,7 @@ export default function Page() {
                     className="flex min-h-12 items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold text-slate-800 transition hover:border-emerald-400 hover:bg-emerald-50"
                   >
                     <span>
-                      {c.name} · {c.relation}
+                      {c.name} Â· {c.relation}
                     </span>
                     <span className="flex items-center gap-1 text-emerald-700">
                       <Phone className="h-4 w-4" aria-hidden />
@@ -1590,20 +1249,20 @@ export default function Page() {
           setGuardResult(null);
           setGuardScanning(false);
         }}
-        title="Message Guard 🛡️"
+        title="Message Guard ðŸ›¡ï¸"
         icon={<ShieldCheck className="h-6 w-6 text-violet-600" aria-hidden />}
       >
         <p className="text-sm font-semibold text-slate-500">
           {lang === "hi"
-            ? "कोई भी संदिग्ध WhatsApp/SMS संदेश यहाँ पेस्ट करें — हम आपके लिए जाँच करेंगे।"
-            : "Paste or forward any suspicious WhatsApp/SMS message here — we will check it for you."}
+            ? "à¤•à¥‹à¤ˆ à¤­à¥€ à¤¸à¤‚à¤¦à¤¿à¤—à¥à¤§ WhatsApp/SMS à¤¸à¤‚à¤¦à¥‡à¤¶ à¤¯à¤¹à¤¾à¤ à¤ªà¥‡à¤¸à¥à¤Ÿ à¤•à¤°à¥‡à¤‚ â€” à¤¹à¤® à¤†à¤ªà¤•à¥‡ à¤²à¤¿à¤ à¤œà¤¾à¤à¤š à¤•à¤°à¥‡à¤‚à¤—à¥‡à¥¤"
+            : "Paste or forward any suspicious WhatsApp/SMS message here â€” we will check it for you."}
         </p>
         <textarea
           value={scamText}
           onChange={(e) => setScamText(e.target.value)}
           rows={5}
           placeholder={
-            lang === "hi" ? "संदेश यहाँ पेस्ट करें…" : "Paste the suspicious message here…"
+            lang === "hi" ? "à¤¸à¤‚à¤¦à¥‡à¤¶ à¤¯à¤¹à¤¾à¤ à¤ªà¥‡à¤¸à¥à¤Ÿ à¤•à¤°à¥‡à¤‚â€¦" : "Paste the suspicious message hereâ€¦"
           }
           className="mt-3 w-full rounded-2xl border-2 border-violet-200 bg-violet-50/50 p-3 text-base font-medium text-slate-800 placeholder:text-slate-400 focus:border-violet-500 focus:outline-none"
         />
@@ -1617,7 +1276,7 @@ export default function Page() {
               }}
               className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 transition hover:border-violet-400 hover:text-violet-700"
             >
-              {lang === "hi" ? `नमूना ${i + 1}` : `Try sample ${i + 1}`}
+              {lang === "hi" ? `à¤¨à¤®à¥‚à¤¨à¤¾ ${i + 1}` : `Try sample ${i + 1}`}
             </button>
           ))}
         </div>
@@ -1629,12 +1288,12 @@ export default function Page() {
           {guardScanning ? (
             <>
               <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
-              {lang === "hi" ? "जाँच हो रही है…" : "Checking message…"}
+              {lang === "hi" ? "à¤œà¤¾à¤à¤š à¤¹à¥‹ à¤°à¤¹à¥€ à¤¹à¥ˆâ€¦" : "Checking messageâ€¦"}
             </>
           ) : (
             <>
               <ShieldCheck className="h-5 w-5" aria-hidden />
-              {lang === "hi" ? "संदेश की जाँच करें" : "Check Message Safety"}
+              {lang === "hi" ? "à¤¸à¤‚à¤¦à¥‡à¤¶ à¤•à¥€ à¤œà¤¾à¤à¤š à¤•à¤°à¥‡à¤‚" : "Check Message Safety"}
             </>
           )}
         </button>
@@ -1661,7 +1320,7 @@ export default function Page() {
               />
             </div>
             <p className="mt-1 text-xs font-bold text-slate-400">
-              {lang === "hi" ? "जोखिम स्कोर" : "Risk score"}: {guardResult.score}/100
+              {lang === "hi" ? "à¤œà¥‹à¤–à¤¿à¤® à¤¸à¥à¤•à¥‹à¤°" : "Risk score"}: {guardResult.score}/100
             </p>
 
             <p className="mt-3 text-base font-bold leading-snug text-slate-800">
@@ -1672,7 +1331,7 @@ export default function Page() {
               <ul className="mt-3 space-y-1.5 text-sm font-semibold text-slate-700">
                 {guardResult.flags.map((f) => (
                   <li key={f.code} className="flex items-start gap-1.5">
-                    <span aria-hidden>⚠️</span>
+                    <span aria-hidden>âš ï¸</span>
                     <span>{lang === "hi" ? f.labelHi : f.label}</span>
                   </li>
                 ))}
@@ -1682,23 +1341,23 @@ export default function Page() {
             <ul className="mt-3 space-y-1.5 rounded-xl bg-white/70 p-3 text-sm font-semibold text-slate-600">
               {guardResult.advice.map((a, i) => (
                 <li key={i} className="flex items-start gap-1.5">
-                  <span aria-hidden>👉</span>
+                  <span aria-hidden>ðŸ‘‰</span>
                   <span>{a[lang]}</span>
                 </li>
               ))}
             </ul>
 
-            {/* Ask Family — share flagged message into the circle chat */}
+            {/* Ask Family â€” share flagged message into the circle chat */}
             <button
               onClick={() => handleShare(guardShareText(guardResult, scamText))}
               className="mt-4 flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 font-extrabold text-white shadow-lg transition hover:bg-emerald-700 active:scale-[0.98]"
             >
               <Users className="h-5 w-5" aria-hidden />
-              {lang === "hi" ? "परिवार से पूछें" : "Ask Family"}
+              {lang === "hi" ? "à¤ªà¤°à¤¿à¤µà¤¾à¤° à¤¸à¥‡ à¤ªà¥‚à¤›à¥‡à¤‚" : "Ask Family"}
             </button>
             <p className="mt-1.5 text-center text-xs font-semibold text-slate-400">
               {lang === "hi"
-                ? "यह संदेश परिवार सर्कल चैट में भेजा जाएगा — कोई न कोई तुरंत मदद करेगा।"
+                ? "à¤¯à¤¹ à¤¸à¤‚à¤¦à¥‡à¤¶ à¤ªà¤°à¤¿à¤µà¤¾à¤° à¤¸à¤°à¥à¤•à¤² à¤šà¥ˆà¤Ÿ à¤®à¥‡à¤‚ à¤­à¥‡à¤œà¤¾ à¤œà¤¾à¤à¤—à¤¾ â€” à¤•à¥‹à¤ˆ à¤¨ à¤•à¥‹à¤ˆ à¤¤à¥à¤°à¤‚à¤¤ à¤®à¤¦à¤¦ à¤•à¤°à¥‡à¤—à¤¾à¥¤"
                 : "Sends the flagged message to your family circle chat for a second opinion."}
             </p>
 
@@ -1708,7 +1367,7 @@ export default function Page() {
                 className="mt-3 flex min-h-12 items-center justify-center gap-2 rounded-xl bg-red-600 font-extrabold text-white transition hover:bg-red-700"
               >
                 <Phone className="h-4 w-4" aria-hidden />
-                {lang === "hi" ? "साइबर हेल्पलाइन 1930 पर रिपोर्ट करें" : "Report to Cyber Helpline 1930"}
+                {lang === "hi" ? "à¤¸à¤¾à¤‡à¤¬à¤° à¤¹à¥‡à¤²à¥à¤ªà¤²à¤¾à¤‡à¤¨ 1930 à¤ªà¤° à¤°à¤¿à¤ªà¥‹à¤°à¥à¤Ÿ à¤•à¤°à¥‡à¤‚" : "Report to Cyber Helpline 1930"}
               </a>
             )}
           </div>
@@ -1723,12 +1382,12 @@ export default function Page() {
         icon={<Siren className="h-6 w-6 animate-pulse" aria-hidden />}
       >
         <p className="text-sm font-semibold text-slate-700">
-          This will immediately alert the entire circle with Mummy ji’s live location:
+          This will immediately alert the entire circle with Mummy jiâ€™s live location:
         </p>
         <ul className="mt-3 space-y-2 text-sm font-semibold text-slate-700">
-          <li>📞 Call &amp; notify all 4 members</li>
-          <li>📍 Share Mummy ji’s live location</li>
-          <li>🔔 Loud siren on every phone</li>
+          <li>ðŸ“ž Call &amp; notify all 4 members</li>
+          <li>ðŸ“ Share Mummy jiâ€™s live location</li>
+          <li>ðŸ”” Loud siren on every phone</li>
         </ul>
         <button
           onClick={triggerCascade}
@@ -1759,7 +1418,7 @@ export default function Page() {
               id="member-name"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              placeholder="e.g. Chachu, Tai ji…"
+              placeholder="e.g. Chachu, Tai jiâ€¦"
               className="mt-1.5 min-h-14 w-full rounded-2xl border-2 border-slate-200 bg-slate-50 p-3 text-base font-semibold text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none"
             />
           </div>
@@ -1800,7 +1459,7 @@ export default function Page() {
             <Plus className="h-5 w-5" aria-hidden /> Add to Circle
           </button>
           <p className="text-center text-xs font-medium text-slate-400">
-            New members start with a 🟢 Safe status and appear instantly on the dashboard.
+            New members start with a ðŸŸ¢ Safe status and appear instantly on the dashboard.
           </p>
         </div>
       </Modal>

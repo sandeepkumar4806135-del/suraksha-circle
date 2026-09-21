@@ -16,7 +16,7 @@ const nextConfig: NextConfig = {
       },
       // Never cache HTML, SW, or manifest — updates must reach users instantly.
       {
-        source: "/:page(sw.js|manifest.json)",
+        source: "/:page(sw.js|firebase-messaging-sw.js|manifest.json)",
         headers: [{ key: "Cache-Control", value: "public, max-age=0, must-revalidate" }],
       },
     ];

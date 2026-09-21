@@ -1,3 +1,4 @@
+import type { Messaging } from "firebase/messaging";
 import { initializeApp, getApp, getApps, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
@@ -59,6 +60,57 @@ export function getDb(): Firestore | null {
   if (!a) return null;
   try {
     return getFirestore(a);
+  } catch {
+    return null;
+  }
+}
+
+/** Public web config used by FCM Web Push (client + service-worker URL). */
+export interface PublicFirebaseConfig {
+  apiKey: string;
+  authDomain: string;
+  projectId: string;
+  messagingSenderId: string;
+  appId: string;
+  /** VAPID key for Web Push — Project Settings → Cloud Messaging. */
+  vapidKey: string;
+}
+
+/**
+ * Public Firebase web config including the VAPID key, or null when either the
+ * base web config or the push VAPID key is missing (push stays disabled).
+ */
+export function getPublicFirebaseConfig(): PublicFirebaseConfig | null {
+  if (!isFirebaseConfigured()) return null;
+  const vapidKey = process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY ?? "";
+  if (!vapidKey) return null;
+  return {
+    apiKey: firebaseConfig.apiKey as string,
+    authDomain: firebaseConfig.authDomain as string,
+    projectId: firebaseConfig.projectId as string,
+    messagingSenderId: firebaseConfig.messagingSenderId as string,
+    appId: firebaseConfig.appId as string,
+    vapidKey,
+  };
+}
+
+/** True when FCM Web Push is fully configured (web config + VAPID key). */
+export function isMessagingConfigured(): boolean {
+  return getPublicFirebaseConfig() !== null;
+}
+
+/**
+ * FCM Messaging instance, or null when Firebase/VAPID is not configured or the
+ * browser does not support Web Push. Lazily imports `firebase/messaging` so it
+ * is never bundled into pages that do not use push.
+ */
+export async function getFirebaseMessaging(): Promise<Messaging | null> {
+  const a = getAppSafe();
+  if (!a || !isMessagingConfigured()) return null;
+  try {
+    const { getMessaging, isSupported } = await import("firebase/messaging");
+    if (!(await isSupported())) return null;
+    return getMessaging(a);
   } catch {
     return null;
   }
