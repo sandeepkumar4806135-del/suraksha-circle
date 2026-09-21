@@ -70,6 +70,7 @@ import {
   type GuardResult,
 } from "@/lib/message-guard";
 import { logActivity, subscribeToActivityLogs, isCheckInOverdue, DEMO_LAST_CHECKIN_BY_MEMBER, type ActivityLog as ActivityLogEntry } from "@/lib/activity-log";
+import { reportSyncError, reportSyncOk } from "@/lib/connectivity";
 
 type ViewMode = "elder" | "family";
 
@@ -332,6 +333,11 @@ export default function Page() {
   // ---- Multi-circle state (persisted in localStorage) ----
   const [joinedCircles, setJoinedCircles] = useState<JoinedCircle[]>([]);
   const [activeCircleId, setActiveCircleId] = useState(ACTIVE_CIRCLE_ID);
+  // Ghost-update guard: circle-scoped feeds only accept snapshots for the
+  // circle that was active when the listener attached. If the user switches
+  // circles while a snapshot is in flight, the stale callback is dropped.
+  const activeCircleRef = useRef(activeCircleId);
+  activeCircleRef.current = activeCircleId;
   // ---- Safe zones (geofencing) ----
   const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -407,16 +413,49 @@ export default function Page() {
   // Live activity feed from Firestore (filtered by the active Circle ID),
   // newest first; falls back to demo events when Firebase isn't configured.
   // Re-subscribes automatically whenever the active circle changes.
+  // Cleanup safety: the returned cleanup unsubscribes events + audit feeds
+  // BEFORE the new circle's listeners attach, so snapshots from the previous
+  // circle can never overwrite the new circle's state (no ghost updates).
   useEffect(() => {
+    const circleAtAttach = activeCircleId;
+    const isCurrent = () => activeCircleRef.current === circleAtAttach;
     const unsubscribe = subscribeToCircleEvents(
-      activeCircleId,
-      (feed) => setEvents(feed),
-      () => showToast("⚠️ Live feed unavailable — showing demo activity")
+      circleAtAttach,
+      (feed) => {
+        if (!isCurrent()) return;
+        reportSyncOk("events");
+        // Merge, don't replace: keep optimistic local entries (local-* ids)
+        // that the server snapshot does not contain yet — no flicker.
+        setEvents((prev) => {
+          const pending = prev.filter(
+            (p) => p.id.startsWith("local-") && !feed.some((f) => f.id === p.id)
+          );
+          return [...pending, ...feed].slice(0, 100);
+        });
+      },
+      () => {
+        reportSyncError("events");
+        showToast("⚠️ Live feed unavailable — showing demo activity");
+      }
     );
     const unsubAudit = subscribeToActivityLogs(
-      activeCircleId,
-      (logs) => setAuditLogs(logs),
-      (err) => console.warn("[Suraksha Circle] Activity log unavailable:", err)
+      circleAtAttach,
+      (logs) => {
+        if (!isCurrent()) return;
+        reportSyncOk("activity");
+        // Same merge strategy as the events feed: preserve optimistic
+        // local-* entries across committed server snapshots.
+        setAuditLogs((prev) => {
+          const pending = prev.filter(
+            (p) => p.id.startsWith("local-") && !logs.some((l) => l.id === p.id)
+          );
+          return [...pending, ...logs].slice(0, 100);
+        });
+      },
+      () => {
+        reportSyncError("activity");
+        console.warn("[Suraksha Circle] Activity log unavailable");
+      }
     );
     return () => {
       unsubscribe();
@@ -429,8 +468,12 @@ export default function Page() {
   useEffect(() => {
     const unsubscribe = subscribeToActiveSos(
       activeCircleId,
-      setSosAlert,
+      (alert) => {
+        reportSyncOk("sos");
+        setSosAlert(alert);
+      },
       (err) => {
+        reportSyncError("sos");
         console.warn("[Suraksha Circle] SOS listener error:", err);
         setSosAlert(null);
       }
@@ -605,7 +648,7 @@ export default function Page() {
       userName: "Rahul",
       message,
     }).then((entry) =>
-      setAuditLogs((prev) => [entry, ...prev].slice(0, 100))
+      setAuditLogs((prev) => (prev.some((p) => p.id === entry.id) ? prev : [entry, ...prev]).slice(0, 100))
     );
     showToast(
       lang === "hi"
@@ -627,7 +670,11 @@ export default function Page() {
     showToast("📍 Family place marked: Home");
   }
 
-  /** Logs a circle event to Firestore (when configured) and renders it instantly. */
+  /** Logs a circle event to Firestore (when configured) and renders it instantly.
+   * Merge strategy: optimistic local entries are appended immediately and kept
+   * when the next committed server snapshot arrives (matched by id), so the
+   * feed never flickers or duplicates during multi-device sync.
+   */
   function logEvent(
     type: CircleEventType,
     actorName: string,
@@ -636,7 +683,7 @@ export default function Page() {
     active = false
   ) {
     pushCircleEvent({ circleId: activeCircleId, type, actorName, title, detail, active }).then(
-      (e) => setEvents((prev) => [e, ...prev])
+      (e) => setEvents((prev) => (prev.some((p) => p.id === e.id) ? prev : [e, ...prev]))
     );
   }
 
@@ -884,7 +931,7 @@ export default function Page() {
 
       <main className="mx-auto w-full max-w-lg px-4 pt-6">
         {/* ===== Offline status banner (global connection tracking) ===== */}
-        <OfflineBanner elder={isElder} />
+        <OfflineBanner elder={isElder} lang={lang} />
         {/* ===== Real-time SOS Emergency Banner ===== */}
         <SosBanner
           alert={sosAlert}

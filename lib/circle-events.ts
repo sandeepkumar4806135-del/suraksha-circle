@@ -81,7 +81,13 @@ export function subscribeToCircleEvents(circleId: string, onData: (events: Circl
   const db = getDb();
   if (!db) { onData([...DEMO_EVENTS]); return () => undefined; }
   const q = query(collection(db, "circles", circleId, "events"), orderBy("timestamp", "desc"), limit(100));
-  return onSnapshot(q, snap => onData(snap.docs.map(d => normalizeEvent(circleId, d.id, d.data()))), err => { onError?.(err); onData([...DEMO_EVENTS]); });
+  return onSnapshot(q, { includeMetadataChanges: false }, snap => {
+    // Skip purely local (uncommitted) snapshots so optimistic local entries
+    // appended by pushCircleEvent are not duplicated by the echo of our own
+    // pending writes — only committed server snapshots replace the feed.
+    if (snap.metadata.hasPendingWrites) return;
+    onData(snap.docs.map(d => normalizeEvent(circleId, d.id, d.data())));
+  }, err => { onError?.(err); onData([...DEMO_EVENTS]); });
 }
 
 export async function pushCircleEvent(evt: Omit<CircleEvent, "id" | "timestamp"> & { timestamp?: number }): Promise<CircleEvent> {

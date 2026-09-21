@@ -166,6 +166,18 @@ service cloud.firestore {
       allow delete: if false; // keep the audit trail
     }
 
+    // Firestore: beta feedback collection (append-only, shape-validated).
+    match /betaFeedback/{feedbackId} {
+      allow read: if false; // reviewed via console / admin only
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasAll(['userId', 'userName', 'category', 'message'])
+        && request.resource.data.category in ['bug', 'feature', 'general']
+        && request.resource.data.message is string
+        && request.resource.data.message.size() >= 5
+        && request.resource.data.message.size() < 1000;
+      allow update, delete: if false;
+    }
+
     // Defense in depth: default is deny; this makes it explicit.
     match /{document=**} {
       allow read, write: if false;

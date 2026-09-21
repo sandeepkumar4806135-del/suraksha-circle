@@ -72,7 +72,12 @@ export function subscribeToActivityLogs(circleId: string, onData: (logs: Activit
     return () => undefined;
   }
   const q = query(collection(db, "circles", circleId, COLLECTION), orderBy("timestamp", "desc"), limit(100));
-  return onSnapshot(q, (snap) => onData(snap.docs.map((d) => normalizeLog(circleId, d.id, d.data()))), (err) => {
+  // Skip local-only snapshots (pending writes) so optimistic entries appended
+  // by the caller merge cleanly instead of flickering/duplicating on echo.
+  return onSnapshot(q, { includeMetadataChanges: false }, (snap) => {
+    if (snap.metadata.hasPendingWrites) return;
+    onData(snap.docs.map((d) => normalizeLog(circleId, d.id, d.data())));
+  }, (err) => {
     onError?.(err);
     onData([...DEMO_ACTIVITY_LOGS]);
   });
