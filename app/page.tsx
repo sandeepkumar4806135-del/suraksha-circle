@@ -25,6 +25,8 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import type { User } from "firebase/auth";
 import ActivityLog from "@/components/ActivityLog";
 import ActivityLogCard from "@/components/ActivityLogCard";
 import { SosBanner } from "@/components/SosBanner";
@@ -45,14 +47,13 @@ import {
   type SafeZone,
 } from "@/lib/safe-zones";
 import {
-  loadActiveCircleId,
   loadJoinedCircles,
-  saveActiveCircleId,
   saveJoinedCircles,
   type JoinedCircle,
 } from "@/lib/circle-manager";
+import { onAuthState } from "@/lib/auth";
+import { getCircleName, getUserCircleId } from "@/lib/circle-membership";
 import {
-  ACTIVE_CIRCLE_ID,
   pushCircleEvent,
   subscribeToCircleEvents,
   subscribeToActiveSos,
@@ -303,6 +304,7 @@ function Modal({
 }
 
 export default function Page() {
+  const router = useRouter();
   const [view, setView] = useState<ViewMode>("elder");
   const [lang, setLang] = useState<"en" | "hi">("en");
   const [members, setMembers] = useState<Member[]>(FAMILY_MEMBERS);
@@ -330,9 +332,14 @@ export default function Page() {
   const [toast, setToast] = useState<string | null>(null);
   const [greeting, setGreeting] = useState("Good morning");
   const [dateStr, setDateStr] = useState("");
-  // ---- Multi-circle state (persisted in localStorage) ----
+  // ---- Circle state ----
+  // The joined-circles list backs the header switcher (localStorage); the
+  // ACTIVE circle id comes from the signed-in user's users/{uid} doc and is
+  // "" until the auth gate resolves it (see the auth effects below).
   const [joinedCircles, setJoinedCircles] = useState<JoinedCircle[]>([]);
-  const [activeCircleId, setActiveCircleId] = useState(ACTIVE_CIRCLE_ID);
+  const [activeCircleId, setActiveCircleId] = useState("");
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   // Ghost-update guard: circle-scoped feeds only accept snapshots for the
   // circle that was active when the listener attached. If the user switches
   // circles while a snapshot is in flight, the stale callback is dropped.
@@ -342,20 +349,75 @@ export default function Page() {
   const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Hydrate circle state from localStorage after mount (SSR-safe).
-  // localStorage is unavailable during SSR, so this must run post-hydration.
+  // Hydrate the switcher's circle list from localStorage after mount
+  // (SSR-safe). localStorage is unavailable during SSR, so this runs
+  // post-hydration. The ACTIVE circle id is NOT read from localStorage
+  // anymore — it comes from auth/Firestore via the effects below.
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
-    const circles = loadJoinedCircles();
-    setJoinedCircles(circles);
-    setActiveCircleId(loadActiveCircleId(circles));
+    setJoinedCircles(loadJoinedCircles());
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
+
+  // Resolve the signed-in user (demo session included when Firebase isn't
+  // configured). authReady only flips on the first callback so the render
+  // gate below never redirects before Firebase has had a chance to answer.
+  useEffect(() => {
+    let cancelled = false;
+    const unsubscribe = onAuthState((user) => {
+      if (cancelled) return;
+      setAuthUser(user);
+      setAuthReady(true);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  // Unauthenticated visitors go to the login flow instead of the app.
+  useEffect(() => {
+    if (authReady && !authUser) router.replace("/login");
+  }, [authReady, authUser, router]);
+
+  // Real circle id from users/{uid} — replaces the old hardcoded/localStorage
+  // circle id. Authenticated users without a circle are routed to the login
+  // flow's create-or-join step.
+  useEffect(() => {
+    if (!authReady || !authUser) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const circleId = await getUserCircleId(authUser.uid);
+        if (cancelled) return;
+        if (!circleId) {
+          router.replace("/login");
+          return;
+        }
+        setActiveCircleId(circleId);
+        // Best-effort: label the header switcher with the circle's real name.
+        const name = await getCircleName(circleId);
+        if (cancelled || !name) return;
+        setJoinedCircles((cs) => {
+          const next = cs.some((c) => c.id === circleId)
+            ? cs.map((c) => (c.id === circleId ? { ...c, name } : c))
+            : [...cs, { id: circleId, name, emoji: "🛡️" }];
+          saveJoinedCircles(next);
+          return next;
+        });
+      } catch (err) {
+        console.warn("[Suraksha Circle] Could not load your circle:", err);
+        if (!cancelled) router.replace("/login"); // login flow shows a retryable error
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, authUser, router]);
 
   const handleSelectCircle = (id: string) => {
     if (id === activeCircleId) return;
     setActiveCircleId(id);
-    saveActiveCircleId(id);
     setEvents([]); // clear feed until the new circle's snapshot arrives
     setSosAlert(null);
     setAuditLogs([]);
@@ -369,7 +431,6 @@ export default function Page() {
       return next;
     });
     setActiveCircleId(circle.id);
-    saveActiveCircleId(circle.id);
     setEvents([]);
     setSosAlert(null);
     showToast(`Joined ${circle.name}`);
@@ -417,6 +478,7 @@ export default function Page() {
   // BEFORE the new circle's listeners attach, so snapshots from the previous
   // circle can never overwrite the new circle's state (no ghost updates).
   useEffect(() => {
+    if (!activeCircleId) return; // auth gate: wait for the real circle id
     const circleAtAttach = activeCircleId;
     const isCurrent = () => activeCircleRef.current === circleAtAttach;
     const unsubscribe = subscribeToCircleEvents(
@@ -466,6 +528,7 @@ export default function Page() {
   // Real-time active SOS listener for the circle.
   // Re-subscribes automatically whenever the active circle changes.
   useEffect(() => {
+    if (!activeCircleId) return; // auth gate: wait for the real circle id
     const unsubscribe = subscribeToActiveSos(
       activeCircleId,
       (alert) => {
@@ -872,6 +935,38 @@ export default function Page() {
   const overdueMembers = members.filter((m) => isCheckInOverdue(m.lastCheckInMs));
   const isElder = view === "elder";
   const t = ELDER_TEXT[lang];
+
+  // ---- Auth gate ----
+  // Until the signed-in user (and their circle) resolve, show a warm splash:
+  // unauthenticated visitors get redirected to /login above, while signed-in
+  // users wait here for their circle id instead of seeing a half-loaded app.
+  if (!authReady || !authUser || !activeCircleId) {
+    const signedOut = authReady && !authUser;
+    return (
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-gradient-to-b from-emerald-50 via-white to-white px-6 text-center">
+        <span className="flex h-16 w-16 items-center justify-center rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg">
+          <ShieldCheck className="h-9 w-9" aria-hidden />
+        </span>
+        <div>
+          <p className="text-lg font-extrabold text-slate-900">
+            {signedOut
+              ? lang === "hi"
+                ? "साइन इन पर भेजा जा रहा है…"
+                : "Taking you to sign in…"
+              : lang === "hi"
+                ? "आपका घेरा लोड हो रहा है…"
+                : "Loading your circle…"}
+          </p>
+          <p className="mt-1 text-sm font-semibold text-slate-500">
+            {lang === "hi"
+              ? "परिवार की सुरक्षा के लिए तैयार हो रहा है"
+              : "Preparing your family’s safety space"}
+          </p>
+        </div>
+        <Loader2 className="h-6 w-6 animate-spin text-emerald-600" aria-hidden />
+      </div>
+    );
+  }
 
   return (
     <div

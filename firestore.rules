@@ -40,16 +40,22 @@ service cloud.firestore {
 
     // Circle metadata document (one per family circle).
     // Read: any signed-in member. Never deleted.
+    // Created only by lib/circle-membership: requires a 6-char inviteCode
+    // (immutable afterwards) and the uid-keyed members map.
     match /circles/{circleId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
-        && request.resource.data.name.size() < 120;
+        && request.resource.data.name.size() < 120
+        && request.resource.data.inviteCode is string
+        && request.resource.data.inviteCode.size() == 6
+        && request.resource.data.members is map;
       allow update: if isSignedIn()
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
-        && request.resource.data.name.size() < 120;
+        && request.resource.data.name.size() < 120
+        && request.resource.data.get('inviteCode', null) == resource.data.get('inviteCode', null);
       allow delete: if false;
     }
 
@@ -164,6 +170,30 @@ service cloud.firestore {
         && request.resource.data.circleId == resource.data.circleId
         && request.resource.data.createdAt == resource.data.createdAt;
       allow delete: if false; // keep the audit trail
+    }
+
+    // User profile: one per signed-in account (phone, name, active circle).
+    // Owner-only reads/updates so no one else can see your number or follow
+    // your circle; creation is shape-validated (lib/user-profile).
+    match /users/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create: if isSignedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasAll(['phone', 'displayName', 'circleId', 'createdAt'])
+        && request.resource.data.phone is string
+        && request.resource.data.phone.size() > 0
+        && request.resource.data.phone.size() < 40
+        && (request.resource.data.displayName == null
+            || (request.resource.data.displayName is string
+                && request.resource.data.displayName.size() < 100))
+        && (request.resource.data.circleId == null
+            || request.resource.data.circleId is string);
+      allow update: if isSignedIn() && request.auth.uid == uid
+        && request.resource.data.phone is string
+        && (request.resource.data.displayName == null
+            || request.resource.data.displayName is string)
+        && (request.resource.data.circleId == null
+            || request.resource.data.circleId is string);
+      allow delete: if false;
     }
 
     // Firestore: beta feedback collection (append-only, shape-validated).
