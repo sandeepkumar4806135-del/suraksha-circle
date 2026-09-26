@@ -5,7 +5,7 @@ import { useSyncExternalStore } from "react";
 // ---------------------------------------------------------------------------
 
 /** One Firestore live subscription feeding the Home view. */
-export type SyncSource = "events" | "activity" | "sos";
+export type SyncSource = "events" | "activity" | "sos" | "members";
 
 export interface ConnectivitySnapshot {
   /** Browser-level network state (window online/offline events). */

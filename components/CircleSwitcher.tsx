@@ -1,17 +1,24 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Plus, Users } from "lucide-react";
-import { joinCircleByCode, type JoinedCircle } from "@/lib/circle-manager";
+import { Check, ChevronDown, Loader2, Plus, Users } from "lucide-react";
+import type { JoinedCircle } from "@/lib/circle-manager";
 
 interface CircleSwitcherProps {
   circles: JoinedCircle[];
   activeCircleId: string;
   onSelect: (id: string) => void;
-  onJoin: (circle: JoinedCircle) => void;
+  /**
+   * Joins a circle from a real invite code. Resolves to an error message to
+   * display, or null when the join succeeded (the parent adds the circle).
+   */
+  onJoin: (code: string) => Promise<string | null>;
   /** Elder Mode: large high-contrast touch targets. */
   elder?: boolean;
 }
+
+/** Server-side invite codes: 6 chars, no ambiguous I/O/0/1. */
+const CODE_PATTERN = /^[A-Z0-9]{6}$/;
 
 /** Header dropdown: shows the active circle, switches circles, joins by code. */
 export default function CircleSwitcher({
@@ -24,6 +31,7 @@ export default function CircleSwitcher({
   const [open, setOpen] = useState(false);
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [joining, setJoining] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -50,16 +58,32 @@ export default function CircleSwitcher({
     if (open) inputRef.current?.focus();
   }, [open]);
 
-  const handleJoin = () => {
-    const result = joinCircleByCode(code, circles);
-    if (!result) {
-      setError("Code must be at least 3 characters");
+  /**
+   * Joins with a real invite code. Only codes that resolve to an existing
+   * circle server-side succeed — there is no way to add an arbitrary circle.
+   */
+  const handleJoin = async () => {
+    if (joining) return;
+    const normalized = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!CODE_PATTERN.test(normalized)) {
+      setError("Enter the 6-character invite code");
       return;
     }
     setError(null);
-    setCode("");
-    onJoin(result.joined);
-    setOpen(false);
+    setJoining(true);
+    try {
+      const message = await onJoin(normalized);
+      if (message) {
+        setError(message);
+        return;
+      }
+      setCode("");
+      setOpen(false);
+    } catch {
+      setError("Could not join that circle. Please try again.");
+    } finally {
+      setJoining(false);
+    }
   };
 
   const btn = elder
@@ -91,6 +115,11 @@ export default function CircleSwitcher({
             Your circles
           </p>
           <ul className="max-h-56 space-y-1 overflow-y-auto">
+            {circles.length === 0 && (
+              <li className="px-2 py-3 text-sm font-semibold text-slate-500">
+                No circles yet — join one with your invite code below.
+              </li>
+            )}
             {circles.map((c) => {
               const isActive = c.id === activeCircleId;
               return (
@@ -130,26 +159,40 @@ export default function CircleSwitcher({
                 id="join-code"
                 value={code}
                 onChange={(e) => {
-                  setCode(e.target.value);
+                  setCode(e.target.value.toUpperCase());
                   setError(null);
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleJoin();
+                  if (e.key === "Enter") void handleJoin();
                 }}
-                placeholder="e.g. SC-sharma-family-circle"
-                className="min-w-0 flex-1 rounded-xl border-2 border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none"
+                placeholder="e.g. 7KQ2MP"
+                maxLength={6}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={joining}
+                aria-describedby="join-code-help"
+                className="min-w-0 flex-1 rounded-xl border-2 border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-semibold uppercase tracking-widest text-slate-800 placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
               />
               <button
-                onClick={handleJoin}
-                className="flex min-h-11 shrink-0 items-center gap-1 rounded-xl bg-emerald-600 px-3 font-extrabold text-white transition hover:bg-emerald-700 active:scale-95"
+                onClick={() => void handleJoin()}
+                disabled={joining}
+                className="flex min-h-11 shrink-0 items-center gap-1 rounded-xl bg-emerald-600 px-3 font-extrabold text-white transition hover:bg-emerald-700 active:scale-95 disabled:opacity-60"
               >
-                <Plus aria-hidden className="h-4 w-4" />
-                Join
+                {joining ? (
+                  <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Plus aria-hidden className="h-4 w-4" />
+                )}
+                {joining ? "Joining…" : "Join"}
               </button>
             </div>
-            {error && (
+            {error ? (
               <p className="px-2 pt-1.5 text-xs font-bold text-red-600" role="alert">
                 {error}
+              </p>
+            ) : (
+              <p id="join-code-help" className="px-2 pt-1.5 text-xs font-semibold text-slate-400">
+                Only codes shared by an existing member work.
               </p>
             )}
           </div>

@@ -38,25 +38,86 @@ service cloud.firestore {
         && request.resource.data.radiusM <= 2000;
     }
 
+    // True when the caller already belongs to the circle's members map.
+    // Rules-side reads (get/exists) bypass client read rules, so this can
+    // safely gate reads on collections that are themselves member-only.
+    function memberOf(circleId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/circles/$(circleId))
+        && get(/databases/$(database)/documents/circles/$(circleId)).data.members.get(request.auth.uid, null) != null;
+    }
+
     // Circle metadata document (one per family circle).
-    // Read: any signed-in member. Never deleted.
+    // Read: members only — the doc holds the members map (names + phone
+    // numbers), so circle ids are never a public lookup table. Joiners resolve
+    // invite codes through circleInvites/{code} instead.
     // Created only by lib/circle-membership: requires a 6-char inviteCode
     // (immutable afterwards) and the uid-keyed members map.
     match /circles/{circleId} {
-      allow read: if isSignedIn();
+      allow read: if memberOf(circleId);
       allow create: if isSignedIn()
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
         && request.resource.data.name.size() < 120
+        && request.resource.data.createdBy == request.auth.uid
         && request.resource.data.inviteCode is string
         && request.resource.data.inviteCode.size() == 6
-        && request.resource.data.members is map;
+        && request.resource.data.members is map
+        && request.resource.data.members.keys().hasOnly([request.auth.uid]);
+      // Updates may only ever touch the caller's OWN member entry: nobody can
+      // rewrite another member's name/status/check-in, remove anyone, rename
+      // the circle or rotate its invite code. Joining still works because a
+      // new member only adds their own uid key.
       allow update: if isSignedIn()
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
         && request.resource.data.name.size() < 120
-        && request.resource.data.get('inviteCode', null) == resource.data.get('inviteCode', null);
+        && request.resource.data.get('inviteCode', null) == resource.data.get('inviteCode', null)
+        && request.resource.data.get('createdBy', null) == resource.data.get('createdBy', null)
+        && request.resource.data.members is map
+        && request.resource.data.members.size() >= resource.data.members.size()
+        && request.resource.data.members.diff(resource.data.members).removedKeys().size() == 0
+        && request.resource.data.members.diff(resource.data.members).affectedKeys().hasOnly([request.auth.uid]);
       allow delete: if false;
+    }
+
+    // Invite-code lookup: `circleInvites/{CODE} -> { circleId, circleName }`.
+    // The code is the secret: any signed-in user who was handed one may read
+    // the lookup so they can join without read access to circles they are not
+    // in yet. Codes are immutable and can never be re-pointed at another circle.
+    match /circleInvites/{code} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && code.size() == 6
+        && request.resource.data.keys().hasAll(['circleId', 'circleName', 'createdBy'])
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.circleId is string
+        && request.resource.data.circleId.size() > 0
+        && request.resource.data.circleName is string
+        && request.resource.data.circleName.size() > 0
+        && request.resource.data.circleName.size() < 120
+        // Reserved either for a circle that does not exist yet (the creator's
+        // own flow writes the code before the circle) or for a circle the
+        // caller already belongs to.
+        && (!exists(/databases/$(database)/documents/circles/$(request.resource.data.circleId))
+            || memberOf(request.resource.data.circleId));
+      allow update, delete: if false;
+    }
+
+    // Pending invitations: people added by name before they have an account.
+    // Members manage them; the invitee shows as "Invite pending" on the
+    // dashboard until they join with a code.
+    match /circles/{circleId}/invites/{inviteId} {
+      allow read, delete: if memberOf(circleId);
+      allow create: if memberOf(circleId)
+        && request.resource.data.keys().hasAll(['name', 'addedBy'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() < 100
+        && request.resource.data.addedBy == request.auth.uid
+        && (request.resource.data.role == null || request.resource.data.role is string)
+        && (request.resource.data.city == null || request.resource.data.city is string);
+      allow update: if false;
     }
 
     // Activity feed: events live under each circle, append-only.
@@ -187,12 +248,16 @@ service cloud.firestore {
                 && request.resource.data.displayName.size() < 100))
         && (request.resource.data.circleId == null
             || request.resource.data.circleId is string);
+      // Updates may only ever point circleId at a circle the user really
+      // belongs to (or clear it) — a tampered id cannot fake membership.
       allow update: if isSignedIn() && request.auth.uid == uid
         && request.resource.data.phone is string
         && (request.resource.data.displayName == null
             || request.resource.data.displayName is string)
-        && (request.resource.data.circleId == null
-            || request.resource.data.circleId is string);
+        && (request.resource.data.circleId == resource.data.get('circleId', null)
+            || request.resource.data.circleId == null
+            || (request.resource.data.circleId is string
+                && memberOf(request.resource.data.circleId)));
       allow delete: if false;
     }
 

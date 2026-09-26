@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   BellRing,
@@ -52,7 +52,21 @@ import {
   type JoinedCircle,
 } from "@/lib/circle-manager";
 import { onAuthState } from "@/lib/auth";
-import { getCircleName, getUserCircleId } from "@/lib/circle-membership";
+import { isFirebaseConfigured } from "@/lib/firebase";
+import {
+  addInvitedMember,
+  isCircleMember,
+  joinCircleByInviteCode,
+  listMemberCircles,
+  markMemberCheckIn,
+  setActiveCircleIdForUser,
+  setMemberStatus,
+  subscribeToCircleInvites,
+  subscribeToCircleMembers,
+  getUserCircleId,
+  type CircleInvite,
+  type CircleMember,
+} from "@/lib/circle-membership";
 import {
   pushCircleEvent,
   subscribeToCircleEvents,
@@ -167,6 +181,9 @@ const CHECKIN_KEY = "suraksha-circle:checkin";
 const SOS_SHARE_TEXT =
   "🚨 SOS EMERGENCY! Mummy needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call her immediately. — Sent via Suraksha Circle";
 
+/** Last-known location used in alert copy until device GPS lands. */
+const SOS_LOCATION_FALLBACK = "B-402 Shanti Apartments, Andheri West, Mumbai";
+
 function checkinShareText(time: string): string {
   return `✅ Mummy has checked in safely at ${time} via Suraksha Circle — she is safe at home. 🙏`;
 }
@@ -179,6 +196,121 @@ const AVATAR_CYCLE = [
   "bg-indigo-100 text-indigo-700",
   "bg-orange-100 text-orange-700",
 ] as const;
+
+/** Demo-mode identity, used only when Firebase isn't configured. */
+const DEMO_MY_ID = "mummy";
+const DEMO_MY_NAME = "Mummy";
+
+/** Avatar art for members that have a real account. */
+const MEMBER_EMOJI_CYCLE = ["🧑", "👩", "👨", "👵", "👦"] as const;
+
+/** Nudge markers, persisted per circle so "Nudged ✓" survives a reload. */
+const NUDGE_KEY = "suraksha-circle:nudges";
+
+function loadNudgeMap(): Record<string, Record<string, number>> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(NUDGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, Record<string, number>>) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberNudge(circleId: string, memberId: string, ms: number): void {
+  if (typeof window === "undefined" || !circleId) return;
+  try {
+    const all = loadNudgeMap();
+    all[circleId] = { ...(all[circleId] ?? {}), [memberId]: ms };
+    window.localStorage.setItem(NUDGE_KEY, JSON.stringify(all));
+  } catch {
+    // storage unavailable — this session still shows the nudge marker
+  }
+}
+
+/** Formats an epoch-ms timestamp as "8:45 am". */
+function formatCheckInTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+}
+
+/** True when the timestamp falls on today's date. */
+function isToday(ms: number): boolean {
+  const then = new Date(ms);
+  const now = new Date();
+  return (
+    then.getFullYear() === now.getFullYear() &&
+    then.getMonth() === now.getMonth() &&
+    then.getDate() === now.getDate()
+  );
+}
+
+/**
+ * Firestore members-map entry → dashboard row. Status is derived from the
+ * stored check-in timestamp (safe only for 20h after a real check-in), so no
+ * device can claim safety without a persisted check-in.
+ */
+function memberFromRecord(record: CircleMember, index: number): Member {
+  const avatarClass = AVATAR_CYCLE[index % AVATAR_CYCLE.length];
+  if (record.invited) {
+    return {
+      id: record.uid,
+      name: record.name,
+      location: record.city || "Invite pending",
+      emoji: "✉️",
+      status: "safe",
+      statusLabel: "Invite pending",
+      detail: [record.role, record.city].filter(Boolean).join(" · ") || "Waiting for them to join",
+      avatarClass,
+      lastCheckInMs: Date.now(), // pending invites are never "overdue"
+      lastNudgedMs: null,
+    };
+  }
+  const checkInMs = record.lastCheckInMs;
+  const overdue = checkInMs === null || isCheckInOverdue(checkInMs);
+  const status: Member["status"] =
+    record.status === "travel" ? "travel" : overdue ? "attention" : "safe";
+  return {
+    id: record.uid,
+    name: record.name,
+    location: record.city || record.phone || "Location off",
+    emoji: MEMBER_EMOJI_CYCLE[index % MEMBER_EMOJI_CYCLE.length],
+    status,
+    statusLabel:
+      status === "travel"
+        ? "Travelling"
+        : status === "safe"
+          ? record.city
+            ? `Safe at ${record.city}`
+            : "Safe"
+          : checkInMs === null
+            ? "No check-in yet"
+            : "Missed daily check-in",
+    detail:
+      checkInMs === null
+        ? "No check-in yet — waiting for their first update"
+        : `Checked in ${formatCheckInTime(checkInMs)}`,
+    avatarClass,
+    lastCheckInMs: checkInMs ?? 0,
+    lastNudgedMs: null,
+  };
+}
+
+/** Pending invitation (`circles/{id}/invites` doc) → dashboard row. */
+function inviteRowFromRecord(invite: CircleInvite, index: number, offset: number): Member {
+  return {
+    id: `invite-${invite.id}`,
+    name: invite.name,
+    location: invite.city || "Invite pending",
+    emoji: "✉️",
+    status: "safe",
+    statusLabel: "Invite pending",
+    detail: [invite.role, invite.city].filter(Boolean).join(" · ") || "Waiting for them to join",
+    avatarClass: AVATAR_CYCLE[(offset + index) % AVATAR_CYCLE.length],
+    lastCheckInMs: Date.now(),
+    lastNudgedMs: null,
+  };
+}
 
 const ELDER_TEXT = {
   en: {
@@ -307,9 +439,19 @@ export default function Page() {
   const router = useRouter();
   const [view, setView] = useState<ViewMode>("elder");
   const [lang, setLang] = useState<"en" | "hi">("en");
-  const [members, setMembers] = useState<Member[]>(FAMILY_MEMBERS);
+  // Live circle members. Seeded with the demo fixtures only when Firebase is
+  // unconfigured; otherwise the list is rebuilt from the circles/{id} members
+  // snapshot, keyed by real auth uid (see the members subscription below).
+  const [members, setMembers] = useState<Member[]>(
+    isFirebaseConfigured() ? [] : FAMILY_MEMBERS
+  );
+  const [pendingInvites, setPendingInvites] = useState<CircleInvite[]>([]);
+  const [membersReady, setMembersReady] = useState(!isFirebaseConfigured());
+  const [nudgeMap, setNudgeMap] = useState<Record<string, Record<string, number>>>({});
   const [checkedIn, setCheckedIn] = useState(false);
   const [checkInTime, setCheckInTime] = useState("8:45 AM");
+  /** Epoch ms of this device's check-in today (drives the self row + overdue). */
+  const [myCheckInMs, setMyCheckInMs] = useState<number | null>(null);
   const [sosOpen, setSosOpen] = useState(false);
   const [countdown, setCountdown] = useState(10);
   const [sosSent, setSosSent] = useState(false);
@@ -338,26 +480,63 @@ export default function Page() {
   // "" until the auth gate resolves it (see the auth effects below).
   const [joinedCircles, setJoinedCircles] = useState<JoinedCircle[]>([]);
   const [activeCircleId, setActiveCircleId] = useState("");
+  const [switchingCircle, setSwitchingCircle] = useState(false);
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  // ---- Identity ----
+  // Every write below is performed as the signed-in user. The demo persona is
+  // used only when Firebase isn't configured at all (offline demo mode).
+  const myUid = authUser?.uid ?? "";
+  const myMemberKey = isFirebaseConfigured() ? myUid : DEMO_MY_ID;
+  const myName = isFirebaseConfigured()
+    ? (members.find((m) => m.id === myUid)?.name ??
+      authUser?.displayName ??
+      authUser?.phoneNumber ??
+      "Family member")
+    : DEMO_MY_NAME;
   // Ghost-update guard: circle-scoped feeds only accept snapshots for the
   // circle that was active when the listener attached. If the user switches
   // circles while a snapshot is in flight, the stale callback is dropped.
   const activeCircleRef = useRef(activeCircleId);
   activeCircleRef.current = activeCircleId;
+  // Latest signed-in uid for async snapshot callbacks, so listeners attached
+  // before auth resolves never re-subscribe (or read a stale identity).
+  const myUidRef = useRef(myUid);
+  myUidRef.current = myUid;
   // ---- Safe zones (geofencing) ----
   const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Hydrate the switcher's circle list from localStorage after mount
-  // (SSR-safe). localStorage is unavailable during SSR, so this runs
-  // post-hydration. The ACTIVE circle id is NOT read from localStorage
-  // anymore — it comes from auth/Firestore via the effects below.
+  // Hydrate the switcher's circle list after mount (SSR-safe: localStorage is
+  // unavailable during SSR). The cached list is a convenience only — with
+  // Firestore configured every entry is re-verified against the circles'
+  // members maps and anything the user isn't really in is dropped.
   useEffect(() => {
+    const cached = loadJoinedCircles();
     /* eslint-disable react-hooks/set-state-in-effect */
-    setJoinedCircles(loadJoinedCircles());
+    setJoinedCircles(cached);
+    setNudgeMap(loadNudgeMap());
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, []);
+    if (!authUser || !isFirebaseConfigured()) return;
+    let cancelled = false;
+    void (async () => {
+      const verified = await listMemberCircles(
+        authUser.uid,
+        cached.map((c) => c.id)
+      );
+      if (cancelled || verified.length === 0) return;
+      const next: JoinedCircle[] = verified.map((c) => ({
+        id: c.id,
+        name: c.name,
+        emoji: cached.find((cc) => cc.id === c.id)?.emoji ?? "🛡️",
+      }));
+      setJoinedCircles(next);
+      saveJoinedCircles(next); // remove stale/unverified ids from the cache
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser]);
 
   // Resolve the signed-in user (demo session included when Firebase isn't
   // configured). authReady only flips on the first callback so the render
@@ -380,9 +559,9 @@ export default function Page() {
     if (authReady && !authUser) router.replace("/login");
   }, [authReady, authUser, router]);
 
-  // Real circle id from users/{uid} — replaces the old hardcoded/localStorage
-  // circle id. Authenticated users without a circle are routed to the login
-  // flow's create-or-join step.
+  // Real circle id from users/{uid} — the ACTIVE circle is always the one the
+  // signed-in user's profile points at. Authenticated users without a circle
+  // are routed to the login flow's create-or-join step.
   useEffect(() => {
     if (!authReady || !authUser) return;
     let cancelled = false;
@@ -395,16 +574,6 @@ export default function Page() {
           return;
         }
         setActiveCircleId(circleId);
-        // Best-effort: label the header switcher with the circle's real name.
-        const name = await getCircleName(circleId);
-        if (cancelled || !name) return;
-        setJoinedCircles((cs) => {
-          const next = cs.some((c) => c.id === circleId)
-            ? cs.map((c) => (c.id === circleId ? { ...c, name } : c))
-            : [...cs, { id: circleId, name, emoji: "🛡️" }];
-          saveJoinedCircles(next);
-          return next;
-        });
       } catch (err) {
         console.warn("[Suraksha Circle] Could not load your circle:", err);
         if (!cancelled) router.replace("/login"); // login flow shows a retryable error
@@ -415,26 +584,91 @@ export default function Page() {
     };
   }, [authReady, authUser, router]);
 
-  const handleSelectCircle = (id: string) => {
-    if (id === activeCircleId) return;
+  /** Applies a verified circle id to the UI (clears the previous circle's data). */
+  function applyCircleSwitch(id: string) {
     setActiveCircleId(id);
-    setEvents([]); // clear feed until the new circle's snapshot arrives
+    setMembers([]); // clear until the new circle's members snapshot arrives
+    setPendingInvites([]);
+    setMembersReady(false);
+    setEvents([]);
     setSosAlert(null);
     setAuditLogs([]);
     showToast("Switched circle");
+  }
+
+  /**
+   * Switches circles — only ever to a circle the signed-in user really belongs
+   * to. The localStorage list is re-verified against Firestore before the
+   * switch so a tampered id can never point the app at someone else's circle.
+   */
+  const handleSelectCircle = (id: string) => {
+    if (!id || id === activeCircleId || switchingCircle) return;
+    if (!joinedCircles.some((c) => c.id === id)) {
+      showToast("⚠️ You can only switch to a circle you have joined");
+      return;
+    }
+    if (!isFirebaseConfigured() || !myUid) {
+      applyCircleSwitch(id);
+      return;
+    }
+    setSwitchingCircle(true);
+    void (async () => {
+      try {
+        if (!(await isCircleMember(id, myUid))) {
+          setJoinedCircles((cs) => {
+            const next = cs.filter((c) => c.id !== id);
+            saveJoinedCircles(next);
+            return next;
+          });
+          showToast("⚠️ You are not a member of that circle");
+          return;
+        }
+        if (!(await setActiveCircleIdForUser(myUid, id))) {
+          showToast("⚠️ Could not switch circle — please try again");
+          return;
+        }
+        applyCircleSwitch(id);
+      } finally {
+        setSwitchingCircle(false);
+      }
+    })();
   };
 
-  const handleJoinCircle = (circle: JoinedCircle) => {
-    setJoinedCircles((cs) => {
-      const next = cs.some((c) => c.id === circle.id) ? cs : [...cs, circle];
-      saveJoinedCircles(next);
-      return next;
-    });
-    setActiveCircleId(circle.id);
-    setEvents([]);
-    setSosAlert(null);
-    showToast(`Joined ${circle.name}`);
-  };
+  /**
+   * Joins a circle from a real invite code. Returns an error message for the
+   * switcher to display, or null on success. Verified by Firestore: the code is
+   * the only way in, and the membership is written server-side.
+   */
+  async function handleJoinCircle(code: string): Promise<string | null> {
+    if (!myUid) return "Please sign in again to join a circle.";
+    try {
+      const membership = await joinCircleByInviteCode(
+        myUid,
+        myName,
+        authUser?.phoneNumber ?? "",
+        code
+      );
+      if (!membership) return "No circle matches that invite code.";
+      const circle: JoinedCircle = {
+        id: membership.circleId,
+        name: membership.circleName,
+        emoji: "🛡️",
+      };
+      setJoinedCircles((cs) => {
+        const next = cs.some((c) => c.id === circle.id)
+          ? cs.map((c) => (c.id === circle.id ? { ...c, name: circle.name } : c))
+          : [...cs, circle];
+        saveJoinedCircles(next);
+        return next;
+      });
+      applyCircleSwitch(circle.id);
+      showToast(`✅ Joined ${circle.name}`);
+      return null;
+    } catch (err) {
+      console.warn("[Suraksha Circle] Join failed:", err);
+      return "Could not join that circle. Please check the code and try again.";
+    }
+  }
 
   useEffect(() => {
     // Intentional client-only init: server render can't know local time.
@@ -456,15 +690,15 @@ export default function Page() {
       const raw = window.localStorage.getItem(CHECKIN_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw) as { checkedIn: boolean; time: string; ts: number };
-      if (parsed.checkedIn) {
+      const ts = typeof parsed.ts === "number" ? parsed.ts : Date.now();
+      // Only a check-in from today counts — yesterday's "safe" must not carry over.
+      if (parsed.checkedIn && isToday(ts)) {
         // Intentional client-only init: localStorage is unavailable during SSR.
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setCheckedIn(true);
          
         setCheckInTime(parsed.time);
-        setMembers((ms) =>
-          ms.map((m) => (m.id === "mummy" ? { ...m, detail: `Checked in ${parsed.time}` } : m))
-        );
+        setMyCheckInMs(ts);
       }
     } catch {
       // corrupted storage — ignore and fall back to demo defaults
@@ -522,6 +756,64 @@ export default function Page() {
     return () => {
       unsubscribe();
       unsubAudit();
+    };
+  }, [activeCircleId]);
+
+  // Live circle members + pending invites.
+  // The dashboard renders the REAL members map of circles/{activeCircleId},
+  // keyed by auth uid; the hardcoded fixtures stay in play only when Firebase
+  // is unconfigured (offline demo mode) or unreachable.
+  useEffect(() => {
+    if (!activeCircleId) return; // auth gate: wait for the real circle id
+    if (!isFirebaseConfigured()) {
+      /* eslint-disable react-hooks/set-state-in-effect */
+      setMembers(FAMILY_MEMBERS);
+      setMembersReady(true);
+      /* eslint-enable react-hooks/set-state-in-effect */
+      return;
+    }
+    const circleAtAttach = activeCircleId;
+    const isCurrent = () => activeCircleRef.current === circleAtAttach;
+    const fallBackToDemoData = () => {
+      if (!isCurrent()) return;
+      setMembers(FAMILY_MEMBERS);
+      setMembersReady(true);
+    };
+
+    const unsubscribe = subscribeToCircleMembers(
+      circleAtAttach,
+      (snapshot) => {
+        if (!isCurrent()) return;
+        if (!snapshot) {
+          fallBackToDemoData(); // configured but unreadable — never render empty
+          return;
+        }
+        reportSyncOk("members");
+        setMembers(snapshot.members.map(memberFromRecord));
+        // Reflect this user's own stored check-in (e.g. tapped on another phone).
+        const mine = snapshot.members.find((m) => m.uid === myUidRef.current);
+        if (mine?.lastCheckInMs && isToday(mine.lastCheckInMs)) {
+          setCheckedIn(true);
+          setCheckInTime(formatCheckInTime(mine.lastCheckInMs));
+          setMyCheckInMs(mine.lastCheckInMs);
+        }
+        setMembersReady(true);
+      },
+      () => {
+        if (!isCurrent()) return;
+        reportSyncError("members");
+        showToast("⚠️ Member list unavailable — showing demo data");
+        fallBackToDemoData();
+      }
+    );
+
+    const unsubInvites = subscribeToCircleInvites(circleAtAttach, (invites) => {
+      if (isCurrent()) setPendingInvites(invites);
+    });
+
+    return () => {
+      unsubscribe();
+      unsubInvites();
     };
   }, [activeCircleId]);
 
@@ -589,34 +881,46 @@ export default function Page() {
 
   function closeSos() {
     if (sosSent) {
-      logEvent("sos-resolved", "Mummy", "SOS alert resolved", "Marked safe — alert closed by user");
+      logEvent("sos-resolved", myName, "SOS alert resolved", "Marked safe — alert closed by user");
     }
     setSosOpen(false);
     setSosSent(false);
   }
 
-  function handleCheckIn() {
+  /** One-tap "I'm Safe": writes the real check-in for everyone in the circle. */
+  async function handleCheckIn() {
     if (checkedIn) return;
-    const time = new Date().toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+    const now = Date.now();
+    const time = formatCheckInTime(now);
     setCheckedIn(true);
     setCheckInTime(time);
-    setMembers((ms) => ms.map((m) => (m.id === "mummy" ? { ...m, detail: "Checked in just now" } : m)));
+    setMyCheckInMs(now);
     try {
       window.localStorage.setItem(
         CHECKIN_KEY,
-        JSON.stringify({ checkedIn: true, time, ts: Date.now() })
+        JSON.stringify({ checkedIn: true, time, ts: now })
       );
     } catch {
       // storage unavailable (private mode) — check-in still works for this session
     }
-        logEvent("checkin", "Mummy", "Daily check-in", "Safe at Home, Andheri West");
+    logEvent("checkin", myName, "Daily check-in", "I'm Safe");
     void logActivity({
       circleId: activeCircleId,
       type: "check_in",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "Mummy checked in — I'm Safe",
+      userId: myUid || "demo-user",
+      userName: myName,
+      message: `${myName} checked in — I'm Safe`,
     });
+    // Persist on the circle's members map so every device sees it live.
+    if (isFirebaseConfigured() && myUid) {
+      const saved = await markMemberCheckIn(activeCircleId, myUid);
+      showToast(
+        saved
+          ? "Check-in recorded — your circle has been notified"
+          : "Check-in saved on this device — we couldn't reach your circle"
+      );
+      return;
+    }
     showToast("Check-in recorded");
   }
 
@@ -627,13 +931,7 @@ export default function Page() {
     });
     setCheckedIn(true);
     setCheckInTime(time);
-    setMembers((ms) =>
-      ms.map((m) =>
-        m.id === "mummy"
-          ? { ...m, detail: "Checked in just now" }
-          : m
-      )
-    );
+    setMyCheckInMs(Date.now());
     try {
       window.localStorage.setItem(
         CHECKIN_KEY,
@@ -642,33 +940,47 @@ export default function Page() {
     } catch {}
     logEvent(
       "audio-verification",
-      "Mummy",
+      myName,
       "Voice check-in: I am safe",
       `Recognised "${result.transcript}" · verified via voice · ${time}`
     );
     void logActivity({
       circleId: activeCircleId,
       type: "check_in",
-      userId: "user-0",
-      userName: "Mummy",
-      message: `Mummy voice check-in — I'm Safe (${time})`,
+      userId: myUid || "demo-user",
+      userName: myName,
+      message: `${myName} voice check-in — I'm Safe (${time})`,
     });
+    if (isFirebaseConfigured() && myUid) {
+      void markMemberCheckIn(activeCircleId, myUid);
+    }
     showToast("Check-in recorded");
   }
 
+  /** Reminds the most overdue member — or confirms everyone has checked in. */
   function remindCheckIn() {
-    setMembers((ms) =>
-      ms.map((m) =>
-        m.id === "grandma" ? { ...m, detail: "Reminder sent just now — waiting for check-in" } : m
-      )
-    );
-    showToast("📱 Reminder sent to Grandma (Pune)");
+    const target = overdueMembers[0];
+    if (!target) {
+      showToast("✅ Everyone in the circle has checked in");
+      return;
+    }
+    sendNudge(target);
   }
 
   function triggerCascade() {
     setCascadeOpen(false);
-    logEvent("cascade", "Rahul", "Family emergency cascade triggered", "All members alerted with live location");
-    showToast("🚨 Emergency cascade sent to all 4 members");
+    const count = memberRows.filter((m) => m.id !== myMemberKey).length;
+    logEvent(
+      "cascade",
+      myName,
+      "Family emergency cascade triggered",
+      `All ${count} members alerted with live location`
+    );
+    showToast(
+      count > 0
+        ? `🚨 Emergency cascade sent to all ${count} members`
+        : "🚨 Emergency cascade sent to your circle"
+    );
   }
 
   /** Toggles live location sharing and writes the audit-trail entry. */
@@ -677,19 +989,23 @@ export default function Page() {
     setSharing(next);
     logEvent(
       next ? "share-start" : "share-end",
-      "Mummy",
+      myName,
       next ? "Live location share started" : "Location share ended",
-      next ? "Andheri West, Mumbai" : "Reached safely"
+      next ? "Live location shared with the circle" : "Reached safely"
     );
     void logActivity({
       circleId: activeCircleId,
       type: next ? "location_started" : "location_stopped",
-      userId: "user-0",
-      userName: "Mummy",
+      userId: myUid || "demo-user",
+      userName: myName,
       message: next
-        ? "Mummy started live location sharing"
-        : "Mummy stopped location sharing",
+        ? `${myName} started live location sharing`
+        : `${myName} stopped location sharing`,
     });
+    // Mirror the presence change onto the circle's members map (presence only).
+    if (isFirebaseConfigured() && myUid) {
+      void setMemberStatus(activeCircleId, myUid, next ? "travel" : "safe");
+    }
     showToast(next ? "📍 Live location sharing started" : "Location sharing stopped");
   }
 
@@ -700,15 +1016,17 @@ export default function Page() {
       lang === "hi"
         ? `${member.name} को चेक-इन याद दिलाया 🙏`
         : `Gentle check-in reminder sent to ${member.name}`;
-    setMembers((ms) =>
-      ms.map((m) => (m.id === member.id ? { ...m, lastNudgedMs: now } : m))
-    );
-    logEvent("cascade", "Rahul", `Nudged ${member.name} to check in`, message);
+    rememberNudge(activeCircleId, member.id, now);
+    setNudgeMap((map) => ({
+      ...map,
+      [activeCircleId]: { ...(map[activeCircleId] ?? {}), [member.id]: now },
+    }));
+    logEvent("cascade", myName, `Nudged ${member.name} to check in`, message);
     void logActivity({
       circleId: activeCircleId,
       type: "check_in_nudge",
-      userId: "coordinator",
-      userName: "Rahul",
+      userId: myUid || "demo-user",
+      userName: myName,
       message,
     }).then((entry) =>
       setAuditLogs((prev) => (prev.some((p) => p.id === entry.id) ? prev : [entry, ...prev]).slice(0, 100))
@@ -722,13 +1040,13 @@ export default function Page() {
 
   /** Marks a family place and writes the audit-trail entry. */
   function markFamilyPlace() {
-    logEvent("checkin", "Mummy", "Family place marked", "🏠 Home — Shanti Apartments");
+    logEvent("checkin", myName, "Family place marked", "🏠 Home — saved for the circle");
     void logActivity({
       circleId: activeCircleId,
       type: "place_marked",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "Mummy marked a family place: 🏠 Home",
+      userId: myUid || "demo-user",
+      userName: myName,
+      message: `${myName} marked a family place: 🏠 Home`,
     });
     showToast("📍 Family place marked: Home");
   }
@@ -796,25 +1114,25 @@ export default function Page() {
 
   function sendSos() {
     setSosSent(true);
-    logEvent("sos", "Mummy", "🚨 SOS alert triggered", "Live location shared with circle", true);
+    logEvent("sos", myName, "🚨 SOS alert triggered", "Live location shared with circle", true);
     void logActivity({
       circleId: activeCircleId,
       type: "sos_triggered",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "🚨 SOS triggered by Mummy",
+      userId: myUid || "demo-user",
+      userName: myName,
+      message: `🚨 SOS triggered by ${myName}`,
     });
     // Firestore-based: write real sos_events doc so the banner appears for everyone in the circle
-    raiseSos(activeCircleId, "user-0", "Mummy", "Live location shared with circle").then(
+    raiseSos(activeCircleId, myUid || "demo-user", myName, "Live location shared with circle").then(
       (alert) => setSosAlert(alert)
     );
     // Background SMS/WhatsApp dispatch via /api/notify-sos (fire-and-forget —
     // never blocks or fails the in-app emergency flow).
-    notifyEmergencyContacts("Mummy", "B-402 Shanti Apartments, Andheri West, Mumbai");
+    notifyEmergencyContacts(myName, SOS_LOCATION_FALLBACK);
     // Web Push to all registered circle devices (also fire-and-forget).
     notifyCircleDevices(
-      "🚨 SOS EMERGENCY — Mummy needs help",
-      "Mummy triggered an SOS. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Tap to open Suraksha Circle."
+      `🚨 SOS EMERGENCY — ${myName} needs help`,
+      `${myName} triggered an SOS. Live location: ${SOS_LOCATION_FALLBACK}. Tap to open Suraksha Circle.`
     );
   }
 
@@ -828,22 +1146,22 @@ export default function Page() {
         : "🚨 Abnormal heart rate detected";
     logEvent(
       alert.kind === "fall" ? "fall-detected" : "abnormal-heart-rate",
-      "Mummy",
+      myName,
       title,
       `${alert.detail} · ${alert.heartRate} BPM`,
       true
     );
-    raiseSos(activeCircleId, "user-0", "Mummy", alert.detail).then((sos) =>
+    raiseSos(activeCircleId, myUid || "demo-user", myName, alert.detail).then((sos) =>
       setSosAlert(sos)
     );
     void logActivity({
       circleId: activeCircleId,
       type: "sos_triggered",
-      userId: "user-0",
-      userName: "Mummy",
+      userId: myUid || "demo-user",
+      userName: myName,
       message: `🚨 Wearable SOS — ${title}`,
     });
-    notifyEmergencyContacts("Mummy", "B-402 Shanti Apartments, Andheri West, Mumbai");
+    notifyEmergencyContacts(myName, SOS_LOCATION_FALLBACK);
     notifyCircleDevices(
       title,
       `${alert.detail} — ${alert.heartRate} BPM. Tap to open Suraksha Circle.`
@@ -851,27 +1169,28 @@ export default function Page() {
     showToast("🚨 Wearable emergency — family alerted");
   }
 
-  const isRaisedByMe = sosAlert !== null;
+  // Only the member who raised the alert may mark it safe.
+  const isRaisedByMe = Boolean(myUid && sosAlert?.raisedBy === myUid);
 
   async function acknowledgeSos() {
     const text =
       "🚨 SOS EMERGENCY! " +
       (sosAlert?.raisedByName ?? "Family member") +
-      " needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call immediately. — Sent via Suraksha Circle";
+      ` needs help right now. Live location: ${SOS_LOCATION_FALLBACK}. Please call immediately. — Sent via Suraksha Circle`;
     await handleShare(text);
   }
 
   async function resolveSosAlert() {
     if (!sosAlert) return;
-    await resolveSos(sosAlert, "Mummy");
+    await resolveSos(sosAlert, myName);
     setSosAlert(null);
-    logEvent("sos-resolved", "Mummy", "SOS alert resolved", "Marked safe — alert resolved by user");
+    logEvent("sos-resolved", myName, "SOS alert resolved", "Marked safe — alert resolved by user");
     void logActivity({
       circleId: activeCircleId,
       type: "sos_resolved",
-      userId: "user-0",
-      userName: "Mummy",
-      message: "SOS resolved — Mummy is safe",
+      userId: myUid || "demo-user",
+      userName: myName,
+      message: `SOS resolved — ${myName} is safe`,
     });
     showToast("✅ SOS alert resolved — you are safe");
   }
@@ -901,46 +1220,73 @@ export default function Page() {
     }, 700);
   }
 
-  function handleAddMember() {
+  /** Adds a pending invitation that appears live on every device in the circle. */
+  async function handleAddMember() {
     const name = newName.trim();
     if (!name) return;
-    const city = newCity.trim() || "India";
-    setMembers((ms) => [
-      ...ms,
-      {
-        id: `member-${Date.now()}`,
-        name,
-        location: city,
-        emoji: "🧑",
-        status: "safe",
-        statusLabel: "Safe",
-        detail: `Added just now · ${newRole} · awaiting first check-in`,
-        avatarClass: AVATAR_CYCLE[ms.length % AVATAR_CYCLE.length],
-        lastCheckInMs: Date.now(),
-        lastNudgedMs: null,
-      },
-    ]);
-    logEvent("member-added", name, "Added to the circle", `${newRole} · ${city} · status: Safe`);
+    const city = newCity.trim();
+    const invite = await addInvitedMember(activeCircleId, myUid, name, newRole, city);
+    if (!invite) {
+      showToast("⚠️ Couldn't add that member — please try again");
+      return;
+    }
+    // Optimistic: the invites snapshot confirms it (demo mode keeps it local).
+    setPendingInvites((list) => (list.some((i) => i.id === invite.id) ? list : [invite, ...list]));
+    logEvent(
+      "member-added",
+      myName,
+      "Invited to the circle",
+      `${name} · ${newRole}${city ? ` · ${city}` : ""}`
+    );
     setAddOpen(false);
     setNewName("");
     setNewRole("Mom");
     setNewCity("");
-    showToast(`✅ ${name} added to your Suraksha Circle`);
+    showToast(`✅ ${name} invited — share your circle code so they can join`);
   }
 
-  const attention = members.filter((m) => m.status === "attention").length;
-  const travel = members.filter((m) => m.status === "travel").length;
-  const safe = members.length - attention - travel;
+  // Rows rendered on the dashboard: live circle members plus pending invites,
+  // with local nudge markers and this device's own check-in applied on top.
+  const memberRows = useMemo(() => {
+    const nudges = nudgeMap[activeCircleId] ?? {};
+    return members.map((m) => {
+      const lastNudgedMs = nudges[m.id] ?? m.lastNudgedMs;
+      if (m.id !== myMemberKey || !checkedIn || m.status === "travel") {
+        return { ...m, lastNudgedMs };
+      }
+      return {
+        ...m,
+        lastNudgedMs,
+        status: "safe" as const,
+        statusLabel: m.location ? `Safe at ${m.location}` : "Safe",
+        detail: `Checked in ${checkInTime}`,
+        lastCheckInMs: myCheckInMs ?? Date.now(),
+      };
+    });
+  }, [members, nudgeMap, activeCircleId, myMemberKey, checkedIn, checkInTime, myCheckInMs]);
+  const rows = useMemo(
+    () => [
+      ...memberRows,
+      ...pendingInvites.map((invite, i) => inviteRowFromRecord(invite, i, memberRows.length)),
+    ],
+    [memberRows, pendingInvites]
+  );
+  const attention = memberRows.filter((m) => m.status === "attention").length;
+  const travel = memberRows.filter((m) => m.status === "travel").length;
+  const safe = rows.length - attention - travel;
   // Overdue members: last check-in older than 20h (unknown/overdue state).
-  const overdueMembers = members.filter((m) => isCheckInOverdue(m.lastCheckInMs));
+  const overdueMembers = memberRows.filter((m) => isCheckInOverdue(m.lastCheckInMs));
+  // Names of everyone else in the circle (used in alert copy).
+  const notifyNames = memberRows.filter((m) => m.id !== myMemberKey).map((m) => m.name);
   const isElder = view === "elder";
   const t = ELDER_TEXT[lang];
 
   // ---- Auth gate ----
-  // Until the signed-in user (and their circle) resolve, show a warm splash:
-  // unauthenticated visitors get redirected to /login above, while signed-in
-  // users wait here for their circle id instead of seeing a half-loaded app.
-  if (!authReady || !authUser || !activeCircleId) {
+  // Until the signed-in user, their circle AND that circle's real member list
+  // resolve, show a warm splash: unauthenticated visitors get redirected to
+  // /login above, while signed-in users wait here instead of seeing a
+  // half-loaded app or a stale member list.
+  if (!authReady || !authUser || !activeCircleId || !membersReady) {
     const signedOut = authReady && !authUser;
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-gradient-to-b from-emerald-50 via-white to-white px-6 text-center">
@@ -1052,7 +1398,7 @@ export default function Page() {
             </div>
             <h2 className="text-4xl font-extrabold leading-tight tracking-tight text-slate-900">
               {lang === "hi" ? "नमस्ते" : greeting},{" "}
-              <span className="text-rose-500">Mummy ji</span> <span aria-hidden>❤️</span>
+              <span className="text-rose-500">{isFirebaseConfigured() ? myName : "Mummy ji"}</span> <span aria-hidden>❤️</span>
             </h2>
 
             {/* Large localized safety status */}
@@ -1075,7 +1421,7 @@ export default function Page() {
               <div className="mt-4 flex flex-wrap gap-2">
                 <span className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-sm font-bold text-slate-700 shadow-sm">
                   <Clock className="h-4 w-4 text-slate-400" aria-hidden /> {t.lastCheckIn}{" "}
-                  {checkedIn ? `Today ${checkInTime}` : "8:45 AM"}
+                  {checkedIn ? `Today ${checkInTime}` : "Not yet today"}
                 </span>
                 <span className="rounded-full bg-white px-3 py-1.5 text-sm font-bold text-slate-700 shadow-sm">
                   {t.autoAlerts}
@@ -1152,7 +1498,7 @@ export default function Page() {
               circleId={activeCircleId}
               elder={isElder}
               lang={lang}
-              memberName="Mummy"
+              memberName={myName}
               onStatusChange={showToast}
             />
             <WearableMonitorCard
@@ -1254,7 +1600,7 @@ export default function Page() {
           <div className="space-y-4">
             <p className="text-base font-semibold text-slate-500">{dateStr}</p>
             <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">
-              Hi Rahul 👋 <span className="text-slate-400">·</span>{" "}
+              Hi {myName} 👋 <span className="text-slate-400">·</span>{" "}
               <span className="text-slate-600">Family Dashboard</span>
             </h2>
 
@@ -1272,7 +1618,7 @@ export default function Page() {
                 ) : (
                   <CheckCircle2 className="h-8 w-8" aria-hidden />
                 )}
-                {attention > 0 ? `${safe} of ${members.length} safe` : "All members safe"}
+                {attention > 0 ? `${safe} of ${rows.length} safe` : "All members safe"}
               </p>
               <p className="mt-1 text-sm font-semibold opacity-90 sm:text-base">
                 Circle: {safe} safe · {travel} travelling · {attention} needs attention
@@ -1369,7 +1715,7 @@ export default function Page() {
                 </div>
               </div>
               <ul className="mt-2 divide-y divide-slate-100">
-                {members.map((m) => (
+                {rows.map((m) => (
                   <li
                     key={m.id}
                     className={`flex items-start gap-3 py-4 ${
@@ -1390,14 +1736,22 @@ export default function Page() {
                         </p>
                         <span
                           className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ${
-                            m.status === "safe"
-                              ? "bg-emerald-100 text-emerald-700"
-                              : m.status === "attention"
-                                ? "bg-amber-100 text-amber-800"
-                                : "bg-sky-100 text-sky-700"
+                            m.emoji === "✉️"
+                              ? "bg-slate-100 text-slate-600"
+                              : m.status === "safe"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : m.status === "attention"
+                                  ? "bg-amber-100 text-amber-800"
+                                  : "bg-sky-100 text-sky-700"
                           }`}
                         >
-                          {m.status === "safe" ? "🟢" : m.status === "attention" ? "⚠️" : "🚗"}{" "}
+                          {m.emoji === "✉️"
+                            ? "✉️"
+                            : m.status === "safe"
+                              ? "🟢"
+                              : m.status === "attention"
+                                ? "⚠️"
+                                : "🚗"}{" "}
                           {m.statusLabel}
                         </span>
                       </div>
@@ -1455,7 +1809,7 @@ export default function Page() {
               circleId={activeCircleId}
               elder={isElder}
               lang={lang}
-              memberName="Rahul"
+              memberName={myName}
               onStatusChange={showToast}
             />
 
@@ -1540,7 +1894,7 @@ export default function Page() {
         {!sosSent ? (
           <div className="text-center">
             <p className="font-semibold text-red-800">
-              Alert will be sent to all 4 family members with live location in:
+              Alert will be sent to all {rows.length} family members with live location in:
             </p>
             <div className="relative mx-auto mt-4 flex h-28 w-28 items-center justify-center">
               <span className="absolute inset-0 animate-ping rounded-full bg-red-400 opacity-40" aria-hidden />
@@ -1550,7 +1904,8 @@ export default function Page() {
             </div>
             <ul className="mt-5 space-y-2 text-left text-sm font-semibold text-slate-700">
               <li className="flex items-center gap-2">
-                <Phone className="h-4 w-4 text-red-600" aria-hidden /> Auto-call Rahul → Priya → Papa
+                <Phone className="h-4 w-4 text-red-600" aria-hidden /> Auto-call{" "}
+                {notifyNames.length > 0 ? notifyNames.join(" → ") : "your circle"}
               </li>
               <li className="flex items-center gap-2">
                 <MapPin className="h-4 w-4 text-red-600" aria-hidden /> Share live location with circle
@@ -1579,11 +1934,10 @@ export default function Page() {
             </span>
             <p className="mt-3 text-2xl font-black text-red-700">🚨 EMERGENCY ALERT SENT</p>
             <ul className="mt-4 space-y-2 text-left text-sm font-semibold text-slate-700">
-              <li>✅ Rahul notified — phone ringing</li>
-              <li>✅ Priya notified — SMS + call</li>
-              <li>✅ Papa notified — phone ringing</li>
-              <li>✅ Grandma (Pune) notified — SMS</li>
-              <li>📍 Live location shared: Andheri West, Mumbai</li>
+              {(notifyNames.length > 0 ? notifyNames : ["Your circle"]).map((name) => (
+                <li key={name}>✅ {name} notified — phone ringing</li>
+              ))}
+              <li>📍 Live location shared with the circle</li>
             </ul>
             <button
               onClick={() => handleShare(SOS_SHARE_TEXT)}
@@ -1865,11 +2219,11 @@ export default function Page() {
         icon={<Siren className="h-6 w-6 animate-pulse" aria-hidden />}
       >
         <p className="text-sm font-semibold text-slate-700">
-          This will immediately alert the entire circle with Mummy ji’s live location:
+          This will immediately alert the entire circle with {`${myName}'s live location`}:
         </p>
         <ul className="mt-3 space-y-2 text-sm font-semibold text-slate-700">
-          <li>📞 Call &amp; notify all 4 members</li>
-          <li>📍 Share Mummy ji’s live location</li>
+          <li>📞 Call &amp; notify all {rows.length} members</li>
+          <li>📍 Share {`${myName}'s live location`}</li>
           <li>🔔 Loud siren on every phone</li>
         </ul>
         <button
@@ -1942,7 +2296,7 @@ export default function Page() {
             <Plus className="h-5 w-5" aria-hidden /> Add to Circle
           </button>
           <p className="text-center text-xs font-medium text-slate-400">
-            New members start with a 🟢 Safe status and appear instantly on the dashboard.
+            They appear as ✉️ Invite pending until they join with your circle code.
           </p>
         </div>
       </Modal>
