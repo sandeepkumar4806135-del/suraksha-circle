@@ -1,14 +1,16 @@
 import type { ConfirmationResult, User } from "firebase/auth";
 import {
+  GoogleAuthProvider,
   onAuthStateChanged,
   RecaptchaVerifier,
   signInWithPhoneNumber,
+  signInWithPopup,
   signOut,
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "./firebase";
 
 /**
- * Phone (OTP) authentication for SurakshaCircle.
+ * Authentication for SurakshaCircle (Phone OTP + Google Sign-In).
  *
  * All functions degrade gracefully: when the NEXT_PUBLIC_FIREBASE_* env vars
  * are missing the app runs in demo mode, sendOtp returns a clear
@@ -29,6 +31,8 @@ export interface DemoSession {
   uid: string;
   phone: string;
   circleId: string | null;
+  displayName?: string | null;
+  email?: string | null;
 }
 
 const DEMO_SESSION_KEY = "suraksha.demo-session";
@@ -55,7 +59,13 @@ export function getDemoSession(): DemoSession | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<DemoSession>;
     return parsed && typeof parsed.uid === "string"
-      ? { uid: parsed.uid, phone: parsed.phone ?? "", circleId: parsed.circleId ?? null }
+      ? {
+          uid: parsed.uid,
+          phone: parsed.phone ?? "",
+          circleId: parsed.circleId ?? null,
+          displayName: parsed.displayName ?? null,
+          email: parsed.email ?? null,
+        }
       : null;
   } catch {
     return null;
@@ -86,6 +96,22 @@ export function startDemoSession(phone: string): DemoSession {
   return next;
 }
 
+/** Starts a demo Google session for offline testing when Firebase is not configured. */
+export function startDemoGoogleSession(
+  name = "Google User",
+  email = "user@example.com"
+): DemoSession {
+  const session: DemoSession = {
+    uid: `demo-google-${Math.random().toString(36).slice(2, 10)}`,
+    phone: "",
+    circleId: null,
+    displayName: name,
+    email,
+  };
+  writeDemoSession(session);
+  return session;
+}
+
 /** Points the demo session at a circle id (demo create/join flow). */
 export function setDemoCircleId(circleId: string): void {
   const session = getDemoSession();
@@ -97,15 +123,20 @@ export function setDemoCircleId(circleId: string): void {
 function makeMockUser(session: DemoSession): User {
   return {
     uid: session.uid,
-    phoneNumber: session.phone,
-    displayName: null,
+    phoneNumber: session.phone || null,
+    displayName: session.displayName ?? null,
     photoURL: null,
-    email: null,
-    emailVerified: false,
-    isAnonymous: true,
-    providerId: "phone",
+    email: session.email ?? null,
+    emailVerified: Boolean(session.email),
+    isAnonymous: false,
+    providerId: session.email ? "google.com" : "phone",
     toJSON() {
-      return { uid: session.uid, phoneNumber: session.phone };
+      return {
+        uid: session.uid,
+        phoneNumber: session.phone,
+        displayName: session.displayName,
+        email: session.email,
+      };
     },
   } as unknown as User;
 }
@@ -113,6 +144,22 @@ function makeMockUser(session: DemoSession): User {
 // ---------------------------------------------------------------------------
 // Public auth API
 // ---------------------------------------------------------------------------
+
+/**
+ * Signs in with Google via popup. Falls back to a mock demo user when
+ * Firebase is not configured so the flow stays testable offline.
+ */
+export async function signInWithGoogle(): Promise<User> {
+  if (!isFirebaseConfigured()) {
+    return makeMockUser(startDemoGoogleSession());
+  }
+  const auth = getFirebaseAuth();
+  if (!auth) throw new Error("Firebase Auth is unavailable.");
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  const result = await signInWithPopup(auth, provider);
+  return result.user;
+}
 
 /**
  * Sends an OTP to `phoneNumber` via an invisible reCAPTCHA bound to the

@@ -19,6 +19,7 @@ import {
   confirmOtp,
   onAuthState,
   sendOtp,
+  signInWithGoogle,
   signOutUser,
 } from "@/lib/auth";
 import {
@@ -42,6 +43,11 @@ const AUTH_ERRORS: Record<string, string> = {
   "auth/quota-exceeded": "Today's SMS limit is reached. Please try again later.",
   "auth/network-request-failed": "Network error. Please check your connection and try again.",
   "auth/captcha-check-failed": "reCAPTCHA check failed. Please try again.",
+  "auth/popup-closed-by-user": "Google sign-in was closed before finishing. Please try again.",
+  "auth/cancelled-popup-request": "Another sign-in popup is already open. Please finish it first.",
+  "auth/popup-blocked": "Your browser blocked the Google sign-in popup. Please allow popups and try again.",
+  "auth/unauthorized-domain": "This domain isn't authorized for Google sign-in yet. Please contact support.",
+  "auth/operation-not-allowed": "Google sign-in isn't enabled for this project yet. Please try phone sign-in.",
 };
 
 function errorText(
@@ -89,6 +95,7 @@ export default function LoginPage() {
   const [step, setStep] = useState<Step>("phone");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
 
   // Phone step
   const [phone, setPhone] = useState("");
@@ -99,8 +106,13 @@ export default function LoginPage() {
   const [demoMode, setDemoMode] = useState(false);
   const confirmationRef = useRef<ConfirmationResult | null>(null);
 
-  // Circle step
-  const [session, setSession] = useState<{ uid: string; phone: string } | null>(null);
+  // Circle step (phone/email may both be empty for Google users until profile completes)
+  const [session, setSession] = useState<{
+    uid: string;
+    phone: string;
+    email?: string | null;
+    googleName?: string | null;
+  } | null>(null);
   const [circleMode, setCircleMode] = useState<CircleMode>("choose");
   const [displayName, setDisplayName] = useState("");
   const [circleName, setCircleName] = useState("");
@@ -116,13 +128,29 @@ export default function LoginPage() {
       if (!user) return;
       void (async () => {
         try {
+          await ensureUserProfile(
+            user.uid,
+            user.phoneNumber ?? "",
+            user.displayName ?? null,
+            user.email ?? null,
+          );
           const circleId = await getUserCircleId(user.uid);
           if (cancelled) return;
           if (circleId) {
             router.replace("/");
             return;
           }
-          setSession((prev) => prev ?? { uid: user.uid, phone: user.phoneNumber ?? "" });
+          if (!cancelled && user.displayName) {
+            setDisplayName((prev) => prev || (user.displayName ?? ""));
+          }
+          setSession((prev) =>
+            prev ?? {
+              uid: user.uid,
+              phone: user.phoneNumber ?? "",
+              email: user.email ?? null,
+              googleName: user.displayName ?? null,
+            },
+          );
           setStep("circle");
         } catch (err) {
           if (!cancelled) {
@@ -175,6 +203,42 @@ export default function LoginPage() {
     void requestOtp(pendingPhone);
   }
 
+  /** Google sign-in: creates the profile, then routes by circle membership. */
+  async function handleGoogleSignIn() {
+    if (busy || googleBusy) return;
+    setGoogleBusy(true);
+    setError(null);
+    try {
+      const user = await signInWithGoogle();
+      await ensureUserProfile(
+        user.uid,
+        user.phoneNumber ?? "",
+        user.displayName ?? null,
+        user.email ?? null,
+      );
+      const circleId = await getUserCircleId(user.uid);
+      if (circleId) {
+        router.replace("/");
+        return;
+      }
+      if (user.displayName) {
+        setDisplayName((prev) => prev || (user.displayName ?? ""));
+      }
+      setSession({
+        uid: user.uid,
+        phone: user.phoneNumber ?? "",
+        email: user.email ?? null,
+        googleName: user.displayName ?? null,
+      });
+      setCircleMode("choose");
+      setStep("circle");
+    } catch (err) {
+      setError(errorText(err, "Google sign-in failed. Please try again."));
+    } finally {
+      setGoogleBusy(false);
+    }
+  }
+
   /** Confirms the OTP, creates the profile, then routes by circle membership. */
   async function handleVerifyOtp(e: FormEvent) {
     e.preventDefault();
@@ -207,7 +271,7 @@ export default function LoginPage() {
         router.replace("/");
         return;
       }
-      setSession({ uid, phone: userPhone });
+      setSession({ uid, phone: userPhone, email: null, googleName: null });
       setCircleMode("choose");
       setStep("circle");
     } catch (err) {
@@ -234,7 +298,7 @@ export default function LoginPage() {
     }
     setBusy(true);
     try {
-      await ensureUserProfile(session.uid, session.phone, name);
+      await ensureUserProfile(session.uid, session.phone, name, session.email ?? null);
       await createCircle(session.uid, name, newCircleName);
       router.replace("/");
     } catch (err) {
@@ -261,7 +325,7 @@ export default function LoginPage() {
     }
     setBusy(true);
     try {
-      await ensureUserProfile(session.uid, session.phone, name);
+      await ensureUserProfile(session.uid, session.phone, name, session.email ?? null);
       const joined = await joinCircleByInviteCode(session.uid, name, session.phone, code6);
       if (!joined) {
         setError("No circle found for that invite code. Please check with your family and try again.");
@@ -367,7 +431,33 @@ export default function LoginPage() {
           )}
 
           {step === "phone" && (
-            <form onSubmit={handleSendOtp} className="space-y-4">
+            <div className="space-y-4">
+              <button
+                type="button"
+                onClick={() => void handleGoogleSignIn()}
+                disabled={busy || googleBusy}
+                className="flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl border-2 border-slate-200 bg-white px-5 text-base font-extrabold text-slate-800 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98] disabled:opacity-60"
+              >
+                {googleBusy ? (
+                  <Loader2 className="h-5 w-5 animate-spin text-slate-500" aria-hidden />
+                ) : (
+                  <span
+                    aria-hidden
+                    className="flex h-5 w-5 items-center justify-center rounded-full bg-white text-sm font-black text-slate-700 ring-1 ring-slate-200"
+                  >
+                    G
+                  </span>
+                )}
+                {googleBusy ? "Signing in…" : "Continue with Google"}
+              </button>
+              <div className="flex items-center gap-3" aria-hidden>
+                <span className="h-px flex-1 bg-slate-200" />
+                <span className="text-xs font-black uppercase tracking-widest text-slate-400">
+                  or phone
+                </span>
+                <span className="h-px flex-1 bg-slate-200" />
+              </div>
+              <form onSubmit={handleSendOtp} className="space-y-4">
               <div>
                 <label htmlFor="login-phone" className="block text-sm font-bold text-slate-700">
                   Mobile number
@@ -387,7 +477,7 @@ export default function LoginPage() {
                   We&apos;ll text you a 6-digit code. Standard SMS rates may apply.
                 </p>
               </div>
-              <button type="submit" disabled={busy} className={PRIMARY_BUTTON_CLASS}>
+              <button type="submit" disabled={busy || googleBusy} className={PRIMARY_BUTTON_CLASS}>
                 {busy ? (
                   <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
                 ) : (
@@ -395,7 +485,8 @@ export default function LoginPage() {
                 )}
                 {busy ? "Sending code…" : "Send OTP"}
               </button>
-            </form>
+              </form>
+            </div>
           )}
 
           {step === "otp" && (
@@ -462,10 +553,12 @@ export default function LoginPage() {
           {step === "circle" && (
             <div className="space-y-4">
               <p className="text-sm font-semibold text-slate-600">
-                {session?.phone ? (
+                {session?.phone || session?.email ? (
                   <>
                     Signed in as{" "}
-                    <span className="font-black text-slate-900">{session.phone}</span>
+                    <span className="font-black text-slate-900">
+                      {session.phone || session.email}
+                    </span>
                   </>
                 ) : (
                   "A circle is your family’s private space."

@@ -280,31 +280,42 @@ service cloud.firestore {
       allow delete: if false; // keep the audit trail
     }
 
-    // User profile: one per signed-in account (phone, name, active circle).
-    // Owner-only reads/updates so no one else can see your number or follow
+    // User profile: one per signed-in account (phone, name, active circle, optional email).
+    // Owner-only reads/updates so no one else can see your details or follow
     // your circle; creation is shape-validated (lib/user-profile).
+    // Allows empty/omitted/null phone so Google/OAuth users can create profiles
+    // and complete onboarding smoothly without violating security rules.
     match /users/{uid} {
       allow read: if isSignedIn() && request.auth.uid == uid;
       allow create: if isSignedIn() && request.auth.uid == uid
         && request.resource.data.keys().hasAll(['phone', 'displayName', 'circleId', 'createdAt'])
-        && request.resource.data.phone is string
-        && request.resource.data.phone.size() > 0
-        && request.resource.data.phone.size() < 40
+        && (request.resource.data.phone == null
+            || (request.resource.data.phone is string
+                && request.resource.data.phone.size() < 40))
         && (request.resource.data.displayName == null
             || (request.resource.data.displayName is string
                 && request.resource.data.displayName.size() < 100))
         && (request.resource.data.circleId == null
-            || request.resource.data.circleId is string);
+            || request.resource.data.circleId is string)
+        && (request.resource.data.get('email', null) == null
+            || (request.resource.data.email is string
+                && request.resource.data.email.size() < 150));
       // Updates may only ever point circleId at a circle the user really
       // belongs to (or clear it) — a tampered id cannot fake membership.
       allow update: if isSignedIn() && request.auth.uid == uid
-        && request.resource.data.phone is string
-        && (request.resource.data.displayName == null
-            || request.resource.data.displayName is string)
-        && (request.resource.data.circleId == resource.data.get('circleId', null)
-            || request.resource.data.circleId == null
+        && (request.resource.data.get('phone', null) == null
+            || (request.resource.data.phone is string
+                && request.resource.data.phone.size() < 40))
+        && (request.resource.data.get('displayName', null) == null
+            || (request.resource.data.displayName is string
+                && request.resource.data.displayName.size() < 100))
+        && (request.resource.data.get('circleId', null) == resource.data.get('circleId', null)
+            || request.resource.data.get('circleId', null) == null
             || (request.resource.data.circleId is string
-                && memberOf(request.resource.data.circleId)));
+                && memberOf(request.resource.data.circleId)))
+        && (request.resource.data.get('email', null) == null
+            || (request.resource.data.email is string
+                && request.resource.data.email.size() < 150));
       allow delete: if false;
     }
 
