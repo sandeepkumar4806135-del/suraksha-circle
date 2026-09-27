@@ -37,6 +37,7 @@ import VoiceAssistantButton from "@/components/VoiceAssistantButton";
 import PushNotificationToggle from "@/components/PushNotificationToggle";
 import CaretakerAccessManager from "@/components/CaretakerAccessManager";
 import { subscribeToForegroundPush } from "@/lib/push-notifications";
+import { CARETAKER_ACCESS_ENABLED } from "@/lib/feature-flags";
 import {
   addSafeZone,
   removeSafeZone,
@@ -1771,12 +1772,16 @@ export default function Page() {
               onStatusChange={showToast}
             />
 
-            {/* Caretaker / doctor access manager — generate read-only codes */}
-            <CaretakerAccessManager
-              circleId={activeCircleId}
-              lang={lang}
-              onStatusChange={showToast}
-            />
+            {/* Caretaker / doctor access manager — generate read-only codes.
+                PARKED: hidden until the portal has a real auth model; see
+                lib/feature-flags.ts (CARETAKER_ACCESS_ENABLED). */}
+            {CARETAKER_ACCESS_ENABLED && (
+              <CaretakerAccessManager
+                circleId={activeCircleId}
+                lang={lang}
+                onStatusChange={showToast}
+              />
+            )}
 
             {/* Scam protection */}
             <section className="rounded-3xl border-2 border-violet-200 bg-gradient-to-br from-violet-50 to-fuchsia-50 p-5">

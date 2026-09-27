@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Activity,
   CheckCircle2,
@@ -38,6 +39,7 @@ import {
   type CaretakerSession,
 } from "@/lib/caretaker-access";
 import { getDb } from "@/lib/firebase";
+import { CARETAKER_ACCESS_ENABLED } from "@/lib/feature-flags";
 
 /** Login screen copy (EN/HI). */
 const GATE_TEXT = {
@@ -109,7 +111,94 @@ const PORTAL_TEXT = {
   },
 } as const;
 
+// ---------------------------------------------------------------------------
+// Route entry — PARKED (see lib/feature-flags.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Public entry point for /caretaker. While CARETAKER_ACCESS_ENABLED is false
+ * this returns before ANY hook, auth check, Firestore read or subscription is
+ * set up, so a visitor can never reach the half-working portal. The real
+ * implementation sits untouched below (`CaretakerGate`): re-enabling later is
+ * the flag flip plus the actual auth fix, not a rewrite.
+ */
 export default function CaretakerPortalPage() {
+  if (!CARETAKER_ACCESS_ENABLED) {
+    return <ParkedNotice />;
+  }
+  return <CaretakerGate />;
+}
+
+/**
+ * Plain, honest placeholder for the parked portal — same card/layout pattern
+ * as /privacy and /terms. Intentionally says nothing about access codes: none
+ * are valid while the portal is parked.
+ */
+function ParkedNotice() {
+  return (
+    <main className="min-h-screen bg-gradient-to-b from-emerald-50 via-white to-white">
+      <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6">
+        <Link
+          href="/"
+          className="inline-flex min-h-11 items-center gap-2 rounded-full border-2 border-slate-200 bg-white px-4 text-sm font-extrabold text-slate-700 shadow-sm transition hover:border-emerald-400 hover:text-emerald-700 active:scale-[0.98]"
+        >
+          <span aria-hidden>←</span> Back to home
+        </Link>
+
+        <header className="mt-6 rounded-3xl border border-emerald-100 bg-white p-6 shadow-sm sm:p-8">
+          <p className="text-sm font-black uppercase tracking-widest text-emerald-600">
+            🛡️ SurakshaCircle
+          </p>
+          <h1 className="mt-2 text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">
+            Caretaker access isn&apos;t available yet
+          </h1>
+          <p className="mt-2 text-sm font-semibold text-slate-500">
+            Caretaker / Doctor Portal · coming soon
+          </p>
+          <p className="mt-4 text-base font-medium leading-relaxed text-slate-600">
+            Please check back soon. We&apos;re building this so a doctor or
+            hired caretaker can see a read-only snapshot of an elder&apos;s
+            details with the family&apos;s consent, and we would rather not
+            hand out access codes until that is properly secured.
+          </p>
+        </header>
+
+        <div className="mt-6 space-y-4">
+          <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-7">
+            <h2 className="text-xl font-extrabold text-slate-900">
+              What to do meanwhile
+            </h2>
+            <p className="mt-3 text-base font-medium leading-relaxed text-slate-600">
+              Any access code shared earlier is not active right now, so please
+              don&apos;t rely on it. Family members keep their usual in-app
+              view of check-ins and alerts, and for anything urgent you should
+              contact the family directly.
+            </p>
+          </section>
+        </div>
+
+        <footer className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 text-center shadow-sm">
+          <p className="text-sm font-semibold text-slate-500">
+            Return{" "}
+            <Link
+              href="/"
+              className="font-extrabold text-emerald-700 underline underline-offset-2 hover:text-emerald-800"
+            >
+              home
+            </Link>
+            .
+          </p>
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Parked implementation — unreachable while the flag is false
+// ---------------------------------------------------------------------------
+
+function CaretakerGate() {
   const [lang, setLang] = useState<"en" | "hi">("en");
   const [session, setSession] = useState<CaretakerSession | null>(null);
   const [hydrated, setHydrated] = useState(false);
