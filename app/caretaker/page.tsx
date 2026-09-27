@@ -29,7 +29,6 @@ import {
 } from "@/lib/circle-events";
 import { DEMO_SCHEDULES, type ScheduleItem } from "@/lib/medication-schedule";
 import { subscribeToSafeZones, type SafeZone } from "@/lib/safe-zones";
-import { useWearableMonitor } from "@/lib/wearable-monitor";
 import {
   endCaretakerSession,
   restoreCaretakerSession,
@@ -73,7 +72,6 @@ const PORTAL_TEXT = {
   en: {
     badgeSuffix: "Portal",
     readOnly: "READ-ONLY ACCESS",
-    elderVitals: "Elder Vitals",
     safeZones: "Safe Zones",
     medCompliance: "Medication Compliance",
     activity: "Recent Activity",
@@ -83,12 +81,6 @@ const PORTAL_TEXT = {
       `${taken} of ${total} doses taken today (${pct}% compliance)`,
     taken: "Taken",
     pending: "Pending",
-    bpm: "BPM",
-    steps: "steps",
-    battery: "battery",
-    lastSync: "Last sync",
-    hrNormal: "Normal",
-    hrHigh: "High",
     welcome: (name: string) => `Welcome, ${name}`,
     expires: "Access expires",
     signOut: "Sign Out",
@@ -99,7 +91,6 @@ const PORTAL_TEXT = {
   hi: {
     badgeSuffix: "पोर्टल",
     readOnly: "केवल-पढ़ने की पहुँच",
-    elderVitals: "वृद्ध के वाइटल्स",
     safeZones: "सुरक्षित क्षेत्र",
     medCompliance: "दवा अनुपालन",
     activity: "हाल की गतिविधि",
@@ -109,12 +100,6 @@ const PORTAL_TEXT = {
       `आज ${total} में से ${taken} खुराकें ली गईं (${pct}% अनुपालन)`,
     taken: "ली गई",
     pending: "बाकी",
-    bpm: "बीपीएम",
-    steps: "कदम",
-    battery: "बैटरी",
-    lastSync: "अंतिम सिंक",
-    hrNormal: "सामान्य",
-    hrHigh: "उच्च",
     welcome: (name: string) => `स्वागत है, ${name}`,
     expires: "पहुँच समाप्ति",
     signOut: "साइन आउट",
@@ -283,7 +268,6 @@ function CaretakerPortalView({
   const meta = ROLE_META[session.role];
   const perms = ROLE_PERMISSIONS[session.role];
 
-  const { stats } = useWearableMonitor(() => undefined);
   const [zones, setZones] = useState<SafeZone[]>([]);
   const [schedules, setSchedules] = useState<ScheduleItem[]>(DEMO_SCHEDULES);
   const [events, setEvents] = useState<CircleEvent[]>([]);
@@ -445,37 +429,6 @@ function CaretakerPortalView({
         </div>
       )}
 
-      {/* Vitals */}
-      <section className="mt-4 rounded-3xl border-2 border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="flex items-center gap-2 text-lg font-extrabold text-slate-900">
-          <Activity className="h-5 w-5 text-teal-600" aria-hidden />
-          {pt.elderVitals}
-        </h2>
-        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <StatCard
-            label={pt.bpm}
-            value={String(stats.heartRate)}
-            sub={stats.heartRate > 100 ? `⚠️ ${pt.hrHigh}` : `✅ ${pt.hrNormal}`}
-            tone={stats.heartRate > 100 ? "text-rose-600" : "text-emerald-600"}
-          />
-          <StatCard
-            label={pt.steps}
-            value={stats.steps.toLocaleString()}
-            tone="text-slate-900"
-          />
-          <StatCard
-            label={pt.battery}
-            value={`${stats.battery}%`}
-            tone="text-slate-900"
-          />
-          <StatCard
-            label={pt.lastSync}
-            value={fmtTime(stats.lastSync)}
-            tone="text-slate-900"
-          />
-        </div>
-      </section>
-
       {/* Safe zones */}
       <section className="mt-4 rounded-3xl border-2 border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="flex items-center gap-2 text-lg font-extrabold text-slate-900">
@@ -601,28 +554,6 @@ function CaretakerPortalView({
         {hi ? "डेमो डेटा" : "demo data"}
       </p>
     </main>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  sub,
-  tone,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  tone: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-      <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
-        {label}
-      </p>
-      <p className={`mt-1 text-2xl font-black ${tone}`}>{value}</p>
-      {sub && <p className="mt-0.5 text-xs font-bold text-slate-500">{sub}</p>}
-    </div>
   );
 }
 

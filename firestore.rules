@@ -3,8 +3,13 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ------------------------------------------------------------------
-    // Helpers (MVP: any signed-in user; tighten to per-member checks once
-    // auth roles / membership claims land).
+    // Helpers. All circle data — the circle doc itself and every
+    // subcollection under it — is gated on REAL membership through
+    // memberOf(). Everything NOT member-gated is deliberate and noted inline:
+    // the invite-code lookup (circleInvites), a user's own profile
+    // (users/{uid}), the append-only beta feedback collection, the circles
+    // create/update pair (the creator is not in the members map yet) and the
+    // sos_events write paths (raising/resolving an alert must never block).
     // ------------------------------------------------------------------
     function isSignedIn() {
       return request.auth != null;
@@ -121,9 +126,10 @@ service cloud.firestore {
     }
 
     // Activity feed: events live under each circle, append-only.
+    // Circle members only: the feed names family members and their actions.
     match /circles/{circleId}/events/{eventId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
+      allow read: if memberOf(circleId);
+      allow create: if memberOf(circleId)
         && request.resource.data.keys().hasAll(['type', 'actorName', 'title'])
         && request.resource.data.type is string
         && request.resource.data.actorName is string
@@ -133,9 +139,10 @@ service cloud.firestore {
     }
 
     // Activity trail: audit log lives under each circle, append-only.
+    // Circle members only: this is SOS-adjacent history for the household.
     match /circles/{circleId}/activityLogs/{logId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
+      allow read: if memberOf(circleId);
+      allow create: if memberOf(circleId)
         && request.resource.data.keys().hasAll(['type', 'userId', 'userName', 'message'])
         && request.resource.data.type in ['check_in', 'check_in_nudge', 'sos_triggered', 'sos_resolved', 'location_started', 'location_stopped', 'place_marked']
         && request.resource.data.userId is string
@@ -148,23 +155,41 @@ service cloud.firestore {
 
     // Safe zones: circles/{circleId}/safezones/{zoneId}.
     // Create + delete only (no in-app edit path today); validated shape.
+    // Circle members only: zones pin a household's geography.
     match /circles/{circleId}/safezones/{zoneId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
+      allow read: if memberOf(circleId);
+      allow create: if memberOf(circleId)
         && request.resource.data.keys().hasAll(['name', 'emoji', 'lat', 'lng', 'radiusM'])
         && isValidZone();
       allow update: if false; // no edit path in safe-zones.ts (create + delete only)
-      allow delete: if isSignedIn();
+      allow delete: if memberOf(circleId);
     }
 
     // Caretaker / doctor access grants: circles/{circleId}/caretaker_access.
-    // Signed-in family members manage grants (create/revoke). External
-    // caretaker sessions are strictly READ-ONLY elsewhere in these rules —
-    // no rule here (or below) ever grants an external visitor a write path
-    // to sos_events, schedules, safezones or events.
+    // Family management only. Every app path here runs for a signed-in member
+    // of THIS circle: components/CaretakerAccessManager.tsx (rendered on the
+    // dashboard with circleId={activeCircleId}) calls listCaretakerGrants
+    // (list), createCaretakerGrant (setDoc) and revokeCaretakerGrant
+    // (setDoc merge -> update), so memberOf(circleId) covers them all. Nothing
+    // in the client deletes a grant, yet delete is gated the same way — it
+    // previously let ANY signed-in account wipe another circle's grants, and
+    // read/create/update let any signed-in account list codes or revoke them.
+    //
+    // The external portal is a separate story and is NOT kept alive by these
+    // rules: app/caretaker/page.tsx has no Firebase Auth session (the codebase
+    // has no signInAnonymously, only phone auth in lib/auth.ts), so its LIST of
+    // this collection is denied under isSignedIn() too — request.auth is null.
+    // lib/caretaker-access.ts:validateCaretakerAccess() swallows that denial
+    // and reports "not-found", so the portal only works in demo mode (no
+    // Firebase config) today. Making it work against a real project needs a
+    // server-side (Admin SDK) code->grant lookup: rules cannot express
+    // "anonymous caller holding a valid code". Follow-up, not a rules change.
+    //
+    // External caretaker sessions stay read-only regardless — no rule here
+    // grants a write path to sos_events, schedules, safezones or events.
     match /circles/{circleId}/caretaker_access/{grantId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
+      allow read: if memberOf(circleId);
+      allow create: if memberOf(circleId)
         && request.resource.data.keys().hasAll(['role', 'codeHash', 'visitorName'])
         && request.resource.data.role in ['doctor', 'caretaker', 'family-admin']
         && request.resource.data.codeHash is string
@@ -172,21 +197,23 @@ service cloud.firestore {
         && request.resource.data.visitorName is string
         && request.resource.data.visitorName.size() > 0
         && request.resource.data.visitorName.size() < 120;
-      // Only the revoked flag may change after creation — codes can never be
+      // Revoke only: role + codeHash stay frozen, so a grant can never be
       // silently re-targeted at another role or circle.
-      allow update: if isSignedIn()
+      allow update: if memberOf(circleId)
         && request.resource.data.role == resource.data.role
         && request.resource.data.codeHash == resource.data.codeHash;
-      allow delete: if isSignedIn(); // hard-remove on cleanup
+      allow delete: if memberOf(circleId);
     }
 
     // FCM Web Push device tokens: circles/{circleId}/push_tokens/{tokenId}.
-    // Any signed-in member may register their device (create/update) or
+    // Any circle member may register their device (create/update) or
     // deregister it (delete). Token docs are never read from the client —
     // the server lists them via Firestore REST with admin credentials.
+    // circleId is NOT stored on token docs, so the membership check must use
+    // the circleId from the document path (the uid alone is not enough).
     match /circles/{circleId}/push_tokens/{tokenId} {
       allow read: if false; // client never needs to read tokens back
-      allow create, update: if isSignedIn()
+      allow create, update: if memberOf(circleId)
         && request.resource.data.keys().hasAll(['token', 'memberName', 'platform'])
         && request.resource.data.token is string
         && request.resource.data.token.size() > 0
@@ -195,32 +222,52 @@ service cloud.firestore {
         && request.resource.data.memberName.size() > 0
         && request.resource.data.memberName.size() < 120
         && request.resource.data.platform is string;
-      allow delete: if isSignedIn();
+      allow delete: if memberOf(circleId);
     }
 
     // Smart schedule / medication reminders: circles/{circleId}/schedules.
     // Identity fields (kind, createdAt) are immutable; status toggles
     // pending <-> taken with a paired takenAt invariant.
+    // Circle members only: this is the elder's medication/schedule detail.
     match /circles/{circleId}/schedules/{scheduleId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn()
+      allow read: if memberOf(circleId);
+      allow create: if memberOf(circleId)
         && request.resource.data.keys().hasAll(['kind', 'name', 'time', 'elderName'])
         && isValidSchedule();
-      allow update: if isSignedIn()
+      allow update: if memberOf(circleId)
         && request.resource.data.status in ['pending', 'taken']
         && (request.resource.data.status == 'taken') == (request.resource.data.takenAt != null)
         && request.resource.data.kind == resource.data.kind
         && request.resource.data.createdAt == resource.data.createdAt
         && isValidSchedule();
-      allow delete: if isSignedIn();
+      allow delete: if memberOf(circleId);
     }
 
     // SOS emergency cascade — must be writable instantly by any signed-in
     // member; resolution is also allowed (banner resolve flow).
     // circleId + createdAt are immutable so an SOS can never be retargeted
     // to another circle. Resolved alerts are kept (delete: false).
+    //
+    // READS are scoped to members of the alert's own circle. Unlike every
+    // other block here, READ has NO {circleId} path segment (the client reads
+    // the top-level /sos_events collection), so membership comes from the
+    // circleId FIELD on the stored document instead of the path. On reads
+    // request.resource is always null, so the stored doc is resource.data.
+    // NOTE (untested, see report): resource.data is populated for list/query
+    // evaluation too — that is why the "rules are not filters" guidance
+    // requires callers to repeat the rule condition as a where() clause — and
+    // get()/exists() are explicitly allowed in query rules (Firestore usage
+    // limits: 10 document access calls per single-document or query request).
+    // So the active-alert query in lib/circle-events.ts must keep its
+    // where('circleId', '==', circleId) constraint; a /sos_events query
+    // without it cannot satisfy this rule and is rejected as a whole.
+    // No emulator run was possible here (no Java runtime, no
+    // @firebase/rules-unit-testing harness), so this block is the least
+    // verified one: if SOS reads are ever rejected in production, move them
+    // behind a server-side (Admin SDK) caller rather than loosening this.
+    // Writes are unchanged.
     match /sos_events/{sosId} {
-      allow read: if isSignedIn();
+      allow read: if isSignedIn() && memberOf(resource.data.circleId);
       allow create: if isSignedIn()
         && request.resource.data.keys().hasAll(['circleId', 'raisedBy', 'raisedByName', 'status'])
         && request.resource.data.status == 'active'

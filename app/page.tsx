@@ -34,11 +34,9 @@ import OfflineBanner from "@/components/OfflineBanner";
 import CircleSwitcher from "@/components/CircleSwitcher";
 import SafeZonesCard from "@/components/SafeZonesCard";
 import VoiceAssistantButton from "@/components/VoiceAssistantButton";
-import WearableMonitorCard from "@/components/WearableMonitorCard";
 import PushNotificationToggle from "@/components/PushNotificationToggle";
 import CaretakerAccessManager from "@/components/CaretakerAccessManager";
 import { subscribeToForegroundPush } from "@/lib/push-notifications";
-import type { WearableAlert } from "@/lib/wearable-monitor";
 import {
   addSafeZone,
   removeSafeZone,
@@ -1136,39 +1134,6 @@ export default function Page() {
     );
   }
 
-  /** Dispatches the real SOS when a wearable fall / abnormal-heart-rate alert
-   * was NOT cancelled within its window. Raises the circle-wide SOS event so
-   * the banner appears for every member, and notifies emergency contacts. */
-  function dispatchWearableSos(alert: WearableAlert) {
-    const title =
-      alert.kind === "fall"
-        ? "🚨 Fall detected by smart wearable"
-        : "🚨 Abnormal heart rate detected";
-    logEvent(
-      alert.kind === "fall" ? "fall-detected" : "abnormal-heart-rate",
-      myName,
-      title,
-      `${alert.detail} · ${alert.heartRate} BPM`,
-      true
-    );
-    raiseSos(activeCircleId, myUid || "demo-user", myName, alert.detail).then((sos) =>
-      setSosAlert(sos)
-    );
-    void logActivity({
-      circleId: activeCircleId,
-      type: "sos_triggered",
-      userId: myUid || "demo-user",
-      userName: myName,
-      message: `🚨 Wearable SOS — ${title}`,
-    });
-    notifyEmergencyContacts(myName, SOS_LOCATION_FALLBACK);
-    notifyCircleDevices(
-      title,
-      `${alert.detail} — ${alert.heartRate} BPM. Tap to open Suraksha Circle.`
-    );
-    showToast("🚨 Wearable emergency — family alerted");
-  }
-
   // Only the member who raised the alert may mark it safe.
   const isRaisedByMe = Boolean(myUid && sosAlert?.raisedBy === myUid);
 
@@ -1493,19 +1458,12 @@ export default function Page() {
               />
             </div>
 
-            {/* Wearable monitor & fall detection (Elder Mode) */}
             <PushNotificationToggle
               circleId={activeCircleId}
               elder={isElder}
               lang={lang}
               memberName={myName}
               onStatusChange={showToast}
-            />
-            <WearableMonitorCard
-              elder={isElder}
-              lang={lang}
-              onDispatch={dispatchWearableSos}
-              onCancel={() => showToast("✅ False alarm cancelled — you are safe")}
             />
 
             {/* Quick cards */}
@@ -1818,14 +1776,6 @@ export default function Page() {
               circleId={activeCircleId}
               lang={lang}
               onStatusChange={showToast}
-            />
-
-            {/* Wearable monitor — family sees Mummy's live band vitals */}
-            <WearableMonitorCard
-              elder={isElder}
-              lang={lang}
-              onDispatch={dispatchWearableSos}
-              onCancel={() => showToast("✅ False alarm cancelled — you are safe")}
             />
 
             {/* Scam protection */}

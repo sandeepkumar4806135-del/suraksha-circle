@@ -25,9 +25,8 @@ interface ErrorBoundaryState {
 // ---------------------------------------------------------------------------
 // Reusable client-side React error boundary
 //
-// Isolates individual widgets (SafeZonesCard, MedicationScheduleCard,
-// WearableMonitorCard, etc.) so that a crash in one card never breaks the rest
-// of the family dashboard.
+// Isolates individual widgets (SafeZonesCard, MedicationScheduleCard, etc.) so
+// that a crash in one card never breaks the rest of the family dashboard.
 //
 // React requires class components for error boundaries, so we expose a thin
 // function-component wrapper (`ErrorBoundary`) plus the class implementation
