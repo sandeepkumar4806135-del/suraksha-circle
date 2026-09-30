@@ -14,6 +14,7 @@ import {
   Loader2,
   MapPin,
   MessageSquareWarning,
+  Pencil,
   Phone,
   Pill,
   Plus,
@@ -33,6 +34,8 @@ import { SosBanner } from "@/components/SosBanner";
 import OfflineBanner from "@/components/OfflineBanner";
 import CircleSwitcher from "@/components/CircleSwitcher";
 import SafeZonesCard from "@/components/SafeZonesCard";
+import PhoneNumberCard from "@/components/PhoneNumberCard";
+import FeedbackWidget from "@/components/FeedbackWidget";
 import VoiceAssistantButton from "@/components/VoiceAssistantButton";
 import PushNotificationToggle from "@/components/PushNotificationToggle";
 import CaretakerAccessManager from "@/components/CaretakerAccessManager";
@@ -40,10 +43,13 @@ import { subscribeToForegroundPush } from "@/lib/push-notifications";
 import { CARETAKER_ACCESS_ENABLED } from "@/lib/feature-flags";
 import {
   addSafeZone,
+  distanceMeters,
   removeSafeZone,
   subscribeToSafeZones,
   useGeofenceWatcher,
+  type GeoPosition,
   type SafeZone,
+  type SafeZoneMember,
 } from "@/lib/safe-zones";
 import {
   loadJoinedCircles,
@@ -51,20 +57,26 @@ import {
   type JoinedCircle,
 } from "@/lib/circle-manager";
 import { onAuthState } from "@/lib/auth";
-import { isFirebaseConfigured } from "@/lib/firebase";
+import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase";
 import {
   addInvitedMember,
+  emptyEmergencyCard,
   isCircleMember,
+  isEmergencyCardEmpty,
   joinCircleByInviteCode,
   listMemberCircles,
   markMemberCheckIn,
+  saveMemberEmergencyCard,
   setActiveCircleIdForUser,
+  setMemberLocationShare,
   setMemberStatus,
   subscribeToCircleInvites,
   subscribeToCircleMembers,
   getUserCircleId,
   type CircleInvite,
   type CircleMember,
+  type EmergencyCard,
+  type MemberLocation,
 } from "@/lib/circle-membership";
 import {
   pushCircleEvent,
@@ -85,6 +97,7 @@ import {
 } from "@/lib/message-guard";
 import { logActivity, subscribeToActivityLogs, isCheckInOverdue, DEMO_LAST_CHECKIN_BY_MEMBER, type ActivityLog as ActivityLogEntry } from "@/lib/activity-log";
 import { reportSyncError, reportSyncOk } from "@/lib/connectivity";
+import { formatPhone, isUsablePhone, telHref } from "@/lib/phone";
 
 type ViewMode = "elder" | "family";
 
@@ -101,8 +114,33 @@ type Member = {
   lastCheckInMs: number;
   /** Epoch ms when the coordinator last sent a nudge (null = never). */
   lastNudgedMs: number | null;
+  /** E.164 phone from the member's own circle entry ("" = not shared yet). */
+  phone: string;
+  /** Medical card the member saved on their own entry (null = none yet). */
+  emergencyCard: EmergencyCard | null;
+  /** Last position the member shared via `members.{uid}.location` (null = none). */
+  sharedLocation: MemberLocation | null;
 };
 
+/** Offline demo medical card for the demo persona — demo mode only. */
+const DEMO_EMERGENCY_CARD: EmergencyCard = {
+  bloodGroup: "B+",
+  age: 62,
+  allergies: ["Penicillin", "Sulfa drugs", "Peanuts"],
+  conditions: ["Type 2 Diabetes", "High Blood Pressure"],
+  medications: ["Metformin 500mg — after breakfast", "Amlodipine 5mg — after dinner"],
+  hospital: "Lilavati Hospital, Bandra West, Mumbai",
+  doctor: "Dr. Mehta — +91 98204 55555",
+  insurance: "Star Health · Policy SH-4452-8890",
+  note: "",
+};
+
+/**
+ * Offline demo circle. Rendered ONLY when Firebase isn't configured (demo mode)
+ * or when a live circle cannot be read. Each row carries the same fields as a
+ * live member entry (phone / emergency card / shared position) so both paths go
+ * through exactly the same components and no fixture can leak into live data.
+ */
 const FAMILY_MEMBERS: Member[] = [
   {
     id: "mummy",
@@ -115,6 +153,9 @@ const FAMILY_MEMBERS: Member[] = [
     avatarClass: "bg-rose-100 text-rose-700",
     lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.mummy,
     lastNudgedMs: null,
+    phone: "",
+    emergencyCard: DEMO_EMERGENCY_CARD,
+    sharedLocation: null,
   },
   {
     id: "papa",
@@ -127,6 +168,9 @@ const FAMILY_MEMBERS: Member[] = [
     avatarClass: "bg-sky-100 text-sky-700",
     lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.papa,
     lastNudgedMs: null,
+    phone: "",
+    emergencyCard: null,
+    sharedLocation: null,
   },
   {
     id: "grandma",
@@ -139,6 +183,9 @@ const FAMILY_MEMBERS: Member[] = [
     avatarClass: "bg-amber-100 text-amber-700",
     lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.grandma,
     lastNudgedMs: null,
+    phone: "",
+    emergencyCard: null,
+    sharedLocation: null,
   },
   {
     id: "brother",
@@ -151,40 +198,100 @@ const FAMILY_MEMBERS: Member[] = [
     avatarClass: "bg-violet-100 text-violet-700",
     lastCheckInMs: DEMO_LAST_CHECKIN_BY_MEMBER.brother,
     lastNudgedMs: null,
+    phone: "",
+    emergencyCard: null,
+    sharedLocation: null,
   },
 ];
 
-type Contact = { name: string; relation: string; phone: string; tel: string };
+/**
+ * A callable contact row. In live mode these are built from the active circle's
+ * real members (name + the phone on their own member entry); the fixture list
+ * below is used only when Firebase isn't configured at all.
+ */
+type Contact = { id: string; name: string; relation: string; phone: string; tel: string };
 
-const CONTACTS: Contact[] = [
-  { name: "Rahul", relation: "Son · Mumbai", phone: "+91 98200 12345", tel: "tel:+919820012345" },
-  { name: "Priya", relation: "Daughter · Bengaluru", phone: "+91 99870 76543", tel: "tel:+919987076543" },
-  { name: "Papa", relation: "Andheri Office", phone: "+91 98200 11111", tel: "tel:+919820011111" },
-  { name: "Dr. Mehta", relation: "Family Doctor", phone: "+91 98204 55555", tel: "tel:+919820455555" },
+/** Offline demo contacts — demo mode only, never merged with live members. */
+const DEMO_CONTACTS: Contact[] = [
+  { id: "demo-rahul", name: "Rahul", relation: "Son · Mumbai", phone: "+91 98200 12345", tel: "tel:+919820012345" },
+  { id: "demo-priya", name: "Priya", relation: "Daughter · Bengaluru", phone: "+91 99870 76543", tel: "tel:+919987076543" },
+  { id: "demo-papa", name: "Papa", relation: "Andheri Office", phone: "+91 98200 11111", tel: "tel:+919820011111" },
+  { id: "demo-doctor", name: "Dr. Mehta", relation: "Family Doctor", phone: "+91 98204 55555", tel: "tel:+919820455555" },
 ];
 
-const MEDICAL = {
-  name: "Sunita Sharma (Mummy ji)",
-  age: 62,
-  bloodGroup: "B+",
-  allergies: ["Penicillin", "Sulfa drugs", "Peanuts"],
-  conditions: ["Type 2 Diabetes", "High Blood Pressure"],
-  medications: ["Metformin 500mg — after breakfast", "Amlodipine 5mg — after dinner"],
-  hospital: "Lilavati Hospital, Bandra West, Mumbai",
-  doctor: "Dr. Mehta — +91 98204 55555",
-  insurance: "Star Health · Policy SH-4452-8890",
-};
+/** Offline demo positions for the safe-zone badges — demo mode only. */
+const DEMO_ZONE_MEMBERS: SafeZoneMember[] = [
+  { uid: "demo-mummy", label: "Mummy", emoji: "👩", lat: 19.1362, lng: 72.8301 },
+  { uid: "demo-papa", label: "Papa", emoji: "👨", lat: 19.1136, lng: 72.8697 },
+  { uid: "demo-brother", label: "Brother", emoji: "🧑", lat: 19.1345, lng: 72.8165 },
+];
 
 const CHECKIN_KEY = "suraksha-circle:checkin";
 
-const SOS_SHARE_TEXT =
-  "🚨 SOS EMERGENCY! Mummy needs help right now. Live location: B-402 Shanti Apartments, Andheri West, Mumbai. Please call her immediately. — Sent via Suraksha Circle";
+/** Offline demo address — shown only when Firebase isn't configured at all. */
+const DEMO_LOCATION = "B-402 Shanti Apartments, Andheri West, Mumbai";
 
-/** Last-known location used in alert copy until device GPS lands. */
-const SOS_LOCATION_FALLBACK = "B-402 Shanti Apartments, Andheri West, Mumbai";
+/** Fallback location label when this device has no GPS fix yet. */
+const UNKNOWN_LOCATION = "shared live from the app";
 
-function checkinShareText(time: string): string {
-  return `✅ Mummy has checked in safely at ${time} via Suraksha Circle — she is safe at home. 🙏`;
+/** Live-share write throttle: at most one publish per 30 s / 50 m of movement. */
+const SHARE_MIN_INTERVAL_MS = 30_000;
+const SHARE_MIN_MOVE_M = 50;
+
+/** A shared position is ignored once it is this old (stale presence filter). */
+const LOCATION_STALE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * One-shot device position, used when the geofence watcher has no fix yet
+ * (e.g. sharing switched on before the watcher's first callback).
+ */
+function readCurrentPosition(): Promise<GeoPosition | null> {
+  return new Promise((resolve) => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (p) =>
+        resolve({ lat: p.coords.latitude, lng: p.coords.longitude, accuracyM: p.coords.accuracy }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 10_000 }
+    );
+  });
+}
+
+/** Fresh Firebase ID token for the signed-in user (null in demo mode). */
+async function currentIdToken(): Promise<string | null> {
+  try {
+    return (await getFirebaseAuth()?.currentUser?.getIdToken()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Comma-separated editor input → trimmed list (emergency-card fields). */
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/** Input styling shared by the emergency-card editor fields. */
+const CARD_INPUT =
+  "mt-1 w-full rounded-xl border-2 border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 placeholder:text-slate-400 focus:border-teal-500 focus:bg-white focus:outline-none";
+
+/**
+ * SOS share copy — always rebuilt from the real name of whoever triggered the
+ * alert plus the location this device is actually reporting.
+ */
+function sosShareText(name: string, location: string): string {
+  return `🚨 SOS EMERGENCY! ${name} needs help right now. Live location: ${location}. Please call immediately. — Sent via Suraksha Circle`;
+}
+
+/** Check-in share copy, also built from the real name + check-in time. */
+function checkinShareText(name: string, time: string): string {
+  return `✅ ${name} has checked in safely at ${time} via Suraksha Circle — everything is okay. 🙏`;
 }
 
 const MEMBER_ROLES = ["Mom", "Dad", "Grandparent", "Sibling", "Spouse", "Other"] as const;
@@ -263,6 +370,9 @@ function memberFromRecord(record: CircleMember, index: number): Member {
       avatarClass,
       lastCheckInMs: Date.now(), // pending invites are never "overdue"
       lastNudgedMs: null,
+      phone: record.phone,
+      emergencyCard: null,
+      sharedLocation: null,
     };
   }
   const checkInMs = record.lastCheckInMs;
@@ -292,6 +402,9 @@ function memberFromRecord(record: CircleMember, index: number): Member {
     avatarClass,
     lastCheckInMs: checkInMs ?? 0,
     lastNudgedMs: null,
+    phone: record.phone,
+    emergencyCard: record.emergencyCard,
+    sharedLocation: record.location,
   };
 }
 
@@ -308,6 +421,9 @@ function inviteRowFromRecord(invite: CircleInvite, index: number, offset: number
     avatarClass: AVATAR_CYCLE[(offset + index) % AVATAR_CYCLE.length],
     lastCheckInMs: Date.now(),
     lastNudgedMs: null,
+    phone: "",
+    emergencyCard: null,
+    sharedLocation: null,
   };
 }
 
@@ -315,16 +431,17 @@ const ELDER_TEXT = {
   en: {
     langBtn: "हिंदी में देखें",
     statusTitle: "You are SAFE ✅",
-    statusNote: "B-402 Shanti Apartments, Andheri West, Mumbai — family can see you are okay",
+    statusNote: "Your family can see that you are okay",
     statusLocal: "आप सुरक्षित हैं 🙏 · Aap poora surakshit hain",
     lastCheckIn: "Last check-in:",
     autoAlerts: "🔔 Auto-alerts ON",
     locationOn: "📍 Location ON",
+    locationOff: "📍 Location off",
     checkTitle: "✅ I’M OKAY",
     checkSub: "Daily Check-in — one tap and your family is notified",
     checkDoneTitle: "YOU ARE CHECKED IN ✓",
     callTitle: "📞 CALL FAMILY",
-    callSub: "Rahul · Priya · Papa — one tap dial",
+    callSub: "One tap to call your family",
     sosTitle: "🚨 SOS EMERGENCY",
     sosSub: "Alert everyone + share live location",
     healthCard: "My Health Card",
@@ -333,16 +450,17 @@ const ELDER_TEXT = {
   hi: {
     langBtn: "View in English",
     statusTitle: "आप सुरक्षित हैं ✅",
-    statusNote: "B-402 शांती अपार्टमेंट्स, अंधेरी पश्चिम, मुंबई — परिवार देख सकता है कि आप ठीक हैं",
+    statusNote: "परिवार देख सकता है कि आप ठीक हैं",
     statusLocal: "You are safe 🙏 · Family ko dikhta hai",
     lastCheckIn: "आख़िरी चेक-इन:",
     autoAlerts: "🔔 ऑटो-अलर्ट चालू",
     locationOn: "📍 लोकेशन चालू",
+    locationOff: "📍 लोकेशन बंद",
     checkTitle: "✅ मैं ठीक हूँ (दैनिक चेक-इन)",
     checkSub: "एक टैप में परिवार को सूचना मिल जाएगी",
     checkDoneTitle: "आपने चेक-इन कर लिया ✓",
     callTitle: "📞 परिवार को कॉल करें",
-    callSub: "राहुल · प्रिया · पापा — एक टैप में कॉल",
+    callSub: "एक टैप में परिवार को कॉल करें",
     sosTitle: "🚨 आपातकालीन SOS",
     sosSub: "सभी को अलर्ट + लाइव लोकेशन शेयर",
     healthCard: "मेरा स्वास्थ्य कार्ड",
@@ -456,6 +574,11 @@ export default function Page() {
   const [sosSent, setSosSent] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
   const [medicalOpen, setMedicalOpen] = useState(false);
+  /** Member whose medical card the modal shows (own card by default). */
+  const [emergencyCardFor, setEmergencyCardFor] = useState("");
+  /** Non-null while the owner is editing their own card. */
+  const [cardDraft, setCardDraft] = useState<EmergencyCard | null>(null);
+  const [savingCard, setSavingCard] = useState(false);
   const [scamOpen, setScamOpen] = useState(false);
   const [scamText, setScamText] = useState("");
   const [guardScanning, setGuardScanning] = useState(false);
@@ -493,6 +616,10 @@ export default function Page() {
       authUser?.phoneNumber ??
       "Family member")
     : DEMO_MY_NAME;
+  // This user's own number: the circle entry first (kept in sync by
+  // PhoneNumberCard), then the auth account's verified number.
+  const myPhone =
+    members.find((m) => m.id === myMemberKey)?.phone || authUser?.phoneNumber || "";
   // Ghost-update guard: circle-scoped feeds only accept snapshots for the
   // circle that was active when the listener attached. If the user switches
   // circles while a snapshot is in flight, the stale callback is dropped.
@@ -504,7 +631,18 @@ export default function Page() {
   myUidRef.current = myUid;
   // ---- Safe zones (geofencing) ----
   const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
+  // Live device position: powers the safe-zone badges ("You") and the real
+  // location used in SOS / check-in copy. Disabled in demo mode (no fixtures,
+  // no permission prompt) and until the real circle id resolves.
+  const { position, error: geoError } = useGeofenceWatcher(
+    activeCircleId,
+    myName,
+    safeZones,
+    isFirebaseConfigured() && Boolean(activeCircleId)
+  );
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Last position published to the circle (live-share throttle state). */
+  const lastShareRef = useRef<{ at: number; lat: number; lng: number } | null>(null);
 
   // Hydrate the switcher's circle list after mount (SSR-safe: localStorage is
   // unavailable during SSR). The cached list is a convenience only — with
@@ -816,6 +954,37 @@ export default function Page() {
     };
   }, [activeCircleId]);
 
+  // Safe zones of the ACTIVE circle, straight from Firestore.
+  // subscribeToSafeZones only ever falls back to the demo zones when Firestore
+  // isn't configured at all — in live mode the list is the circle's own data.
+  useEffect(() => {
+    if (!activeCircleId) return; // auth gate: wait for the real circle id
+    const circleAtAttach = activeCircleId;
+    return subscribeToSafeZones(
+      circleAtAttach,
+      (zones) => {
+        // Ghost-update guard: drop snapshots for a circle we already left.
+        if (activeCircleRef.current !== circleAtAttach) return;
+        setSafeZones(zones);
+      },
+      (err) => {
+        console.warn("[Suraksha Circle] Safe zones unavailable:", err);
+      }
+    );
+  }, [activeCircleId]);
+
+  // While live location sharing is ON, publish this device's position onto the
+  // caller's OWN member entry (`members.{uid}.location`) so the whole circle
+  // sees a real live pin. Throttled so GPS jitter cannot spam Firestore.
+  useEffect(() => {
+    if (!sharing || !position || !activeCircleId || !myUid) return;
+    const last = lastShareRef.current;
+    const movedM = last ? distanceMeters(last, position) : Number.POSITIVE_INFINITY;
+    if (last && Date.now() - last.at < SHARE_MIN_INTERVAL_MS && movedM < SHARE_MIN_MOVE_M) return;
+    lastShareRef.current = { at: Date.now(), lat: position.lat, lng: position.lng };
+    void setMemberLocationShare(activeCircleId, myUid, position);
+  }, [sharing, position, activeCircleId, myUid]);
+
   // Real-time active SOS listener for the circle.
   // Re-subscribes automatically whenever the active circle changes.
   useEffect(() => {
@@ -850,7 +1019,6 @@ export default function Page() {
       cancelled = true;
       unsubscribe?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -982,8 +1150,9 @@ export default function Page() {
     );
   }
 
-  /** Toggles live location sharing and writes the audit-trail entry. */
-  function toggleLocationShare() {
+  /** Toggles live location sharing: publishes (or clears) this device's real
+   * position on the caller's own circle entry and writes the audit-trail entry. */
+  async function toggleLocationShare() {
     const next = !sharing;
     setSharing(next);
     logEvent(
@@ -1004,6 +1173,21 @@ export default function Page() {
     // Mirror the presence change onto the circle's members map (presence only).
     if (isFirebaseConfigured() && myUid) {
       void setMemberStatus(activeCircleId, myUid, next ? "travel" : "safe");
+      if (next) {
+        // Publish the real position straight away — the watcher keeps it fresh.
+        const pos = position ?? (await readCurrentPosition());
+        if (pos) {
+          lastShareRef.current = { at: Date.now(), lat: pos.lat, lng: pos.lng };
+          void setMemberLocationShare(activeCircleId, myUid, pos);
+        } else {
+          showToast("⚠️ Allow location access so your circle can see where you are");
+          return;
+        }
+      } else {
+        // Really stop sharing: remove the pin from the member entry.
+        lastShareRef.current = null;
+        void setMemberLocationShare(activeCircleId, myUid, null);
+      }
     }
     showToast(next ? "📍 Live location sharing started" : "Location sharing stopped");
   }
@@ -1037,6 +1221,87 @@ export default function Page() {
     );
   }
 
+  /** Creates a geofence anchored where this device really is. */
+  async function handleAddSafeZone(zone: {
+    name: string;
+    emoji: string;
+    lat: number;
+    lng: number;
+    radiusM: number;
+  }) {
+    const created = await addSafeZone(activeCircleId, zone);
+    // Optimistic: the zones listener confirms it (visibleZones hides the brief
+    // duplicate while the Firestore copy arrives).
+    setSafeZones((prev) => (prev.some((z) => z.id === created.id) ? prev : [...prev, created]));
+    showToast(`🛡️ Safe zone added: ${created.name}`);
+  }
+
+  /** Removes a safe zone from the circle and from this device. */
+  async function handleRemoveSafeZone(zone: SafeZone) {
+    await removeSafeZone(zone);
+    setSafeZones((prev) => prev.filter((z) => z.id !== zone.id));
+    showToast(`Removed ${zone.name}`);
+  }
+
+  /** Opens the medical card modal on one member (the caller's own by default). */
+  function openEmergencyCard(memberId?: string) {
+    setCardDraft(null);
+    setEmergencyCardFor(memberId ?? myMemberKey);
+    setMedicalOpen(true);
+  }
+
+  /** Closes the card modal, dropping any unsaved edit. */
+  function closeEmergencyCard() {
+    setCardDraft(null);
+    setMedicalOpen(false);
+  }
+
+  /** Starts editing the caller's OWN card — nobody can edit another's. */
+  function startEditEmergencyCard() {
+    const mine = memberRows.find((m) => m.id === myMemberKey)?.emergencyCard ?? null;
+    setCardDraft(
+      mine
+        ? {
+            ...mine,
+            allergies: [...mine.allergies],
+            conditions: [...mine.conditions],
+            medications: [...mine.medications],
+          }
+        : emptyEmergencyCard()
+    );
+  }
+
+  /** Updates one field of the card being edited. */
+  function setCardField<K extends keyof EmergencyCard>(key: K, value: EmergencyCard[K]) {
+    setCardDraft((draft) => (draft ? { ...draft, [key]: value } : draft));
+  }
+
+  /** Persists the edited card on the caller's own circle entry. */
+  async function saveEmergencyCard() {
+    if (!cardDraft || savingCard) return;
+    if (isEmergencyCardEmpty(cardDraft)) {
+      showToast("⚠️ Add at least one detail before saving your card");
+      return;
+    }
+    const stored = cardDraft;
+    setSavingCard(true);
+    const persisted = await saveMemberEmergencyCard(activeCircleId, myUid, stored);
+    setSavingCard(false);
+    setCardDraft(null);
+    // Optimistic local update so the card is readable immediately.
+    setMembers((prev) =>
+      prev.map((m) => (m.id === myMemberKey ? { ...m, emergencyCard: stored } : m))
+    );
+    if (persisted) showToast("✅ Emergency card saved — your circle can see it");
+    else if (isFirebaseConfigured()) showToast("⚠️ Couldn't save your card — please try again");
+    else showToast("Card saved for this demo session");
+  }
+
+  /** Keeps the member row in sync right after the number is saved. */
+  function handlePhoneSaved(phone: string) {
+    setMembers((prev) => prev.map((m) => (m.id === myMemberKey ? { ...m, phone } : m)));
+  }
+
   /** Marks a family place and writes the audit-trail entry. */
   function markFamilyPlace() {
     logEvent("checkin", myName, "Family place marked", "🏠 Home — saved for the circle");
@@ -1068,13 +1333,17 @@ export default function Page() {
   }
 
   /** Fire-and-forget call to /api/send-push — fans the emergency Web Push out
-   * to every registered device in the circle via FCM (server-side). Never
-   * blocks or fails the in-app SOS flow. */
-  function notifyCircleDevices(title: string, body: string) {
+   * to every registered device in the circle via FCM (server-side). Carries
+   * the caller's Firebase ID token so strangers cannot fan-out alerts.
+   * Never blocks or fails the in-app SOS flow. */
+  async function notifyCircleDevices(title: string, body: string) {
     try {
+      const token = await currentIdToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers.Authorization = `Bearer ${token}`;
       void fetch("/api/send-push", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         keepalive: true, // survive tab switch during the emergency
         body: JSON.stringify({
           circleId: activeCircleId,
@@ -1090,22 +1359,34 @@ export default function Page() {
   }
 
   /** Fire-and-forget call to /api/notify-sos — SMS/WhatsApp dispatch happens
-   * server-side (Twilio) or as a simulated console preview when unconfigured. */
-  function notifyEmergencyContacts(raisedByName: string, location: string) {
+   * server-side (Twilio) or as a simulated console preview when unconfigured.
+   * Recipients are the REAL numbers of this circle and the request carries the
+   * caller's Firebase ID token, so the endpoint can never be abused by a
+   * stranger. Skipped entirely when nobody in the circle has a number yet. */
+  async function notifyEmergencyContacts(raisedByName: string, location: string) {
+    const recipients = contacts
+      .map((c) => c.tel.replace("tel:", ""))
+      .filter((phone) => isUsablePhone(phone));
+    if (recipients.length === 0) {
+      console.warn("[Suraksha Circle] SOS SMS skipped — no phone numbers in this circle");
+      return;
+    }
     try {
-      void fetch("/api/notify-sos", {
+      const token = await currentIdToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      await fetch("/api/notify-sos", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         keepalive: true, // survive tab switch during the emergency
         body: JSON.stringify({
           circleId: activeCircleId,
+          raisedBy: myUid,
           raisedByName,
           location,
-          recipients: CONTACTS.map((c) =>
-            c.tel.replace("tel:", "").replace(/\s+/g, "")
-          ),
+          recipients,
         }),
-      }).catch(() => undefined);
+      });
     } catch {
       // dispatch is best-effort; the in-app SOS flow must never break
     }
@@ -1126,12 +1407,13 @@ export default function Page() {
       (alert) => setSosAlert(alert)
     );
     // Background SMS/WhatsApp dispatch via /api/notify-sos (fire-and-forget —
-    // never blocks or fails the in-app emergency flow).
-    notifyEmergencyContacts(myName, SOS_LOCATION_FALLBACK);
+    // never blocks or fails the in-app emergency flow). Recipients are the
+    // circle's real members and the location is what this device reports.
+    void notifyEmergencyContacts(myName, alertLocation);
     // Web Push to all registered circle devices (also fire-and-forget).
     notifyCircleDevices(
       `🚨 SOS EMERGENCY — ${myName} needs help`,
-      `${myName} triggered an SOS. Live location: ${SOS_LOCATION_FALLBACK}. Tap to open Suraksha Circle.`
+      `${myName} triggered an SOS. Live location: ${alertLocation}. Tap to open Suraksha Circle.`
     );
   }
 
@@ -1139,11 +1421,8 @@ export default function Page() {
   const isRaisedByMe = Boolean(myUid && sosAlert?.raisedBy === myUid);
 
   async function acknowledgeSos() {
-    const text =
-      "🚨 SOS EMERGENCY! " +
-      (sosAlert?.raisedByName ?? "Family member") +
-      ` needs help right now. Live location: ${SOS_LOCATION_FALLBACK}. Please call immediately. — Sent via Suraksha Circle`;
-    await handleShare(text);
+    // Share copy is built from the raiser's real name + this device's location.
+    await handleShare(sosShareText(sosAlert?.raisedByName ?? "Family member", alertLocation));
   }
 
   async function resolveSosAlert() {
@@ -1244,6 +1523,57 @@ export default function Page() {
   const overdueMembers = memberRows.filter((m) => isCheckInOverdue(m.lastCheckInMs));
   // Names of everyone else in the circle (used in alert copy).
   const notifyNames = memberRows.filter((m) => m.id !== myMemberKey).map((m) => m.name);
+  // Callable contacts: every other member of THIS circle who saved a number on
+  // their own entry. The fixtures above only survive in demo mode.
+  const contacts = useMemo<Contact[]>(() => {
+    if (!isFirebaseConfigured()) return DEMO_CONTACTS;
+    return memberRows
+      .filter((m) => m.id !== myMemberKey && isUsablePhone(m.phone))
+      .map((m) => ({
+        id: m.id,
+        name: m.name,
+        relation: m.statusLabel || "Circle member",
+        phone: formatPhone(m.phone),
+        tel: telHref(m.phone),
+      }));
+  }, [memberRows, myMemberKey]);
+  // Location used in alert / share copy: what this device actually reports.
+  // Demo builds keep their demo address for the offline walkthrough.
+  const alertLocation = isFirebaseConfigured()
+    ? position
+      ? `${position.lat.toFixed(5)}, ${position.lng.toFixed(5)}`
+      : UNKNOWN_LOCATION
+    : DEMO_LOCATION;
+  // Other members' live positions for the safe-zone badges. Positions older than
+  // LOCATION_STALE_MS are ignored so a crashed session cannot fake presence.
+  const zoneMembers = useMemo<SafeZoneMember[]>(() => {
+    if (!isFirebaseConfigured()) return DEMO_ZONE_MEMBERS;
+    const fresh: SafeZoneMember[] = [];
+    for (const m of memberRows) {
+      if (m.id === myMemberKey) continue;
+      const loc = m.sharedLocation;
+      if (!loc) continue;
+      const ageMs = loc.updatedAtMs === null ? 0 : Date.now() - loc.updatedAtMs;
+      if (ageMs > LOCATION_STALE_MS) continue;
+      fresh.push({ uid: m.id, label: m.name, emoji: m.emoji, lat: loc.lat, lng: loc.lng });
+    }
+    return fresh;
+  }, [memberRows, myMemberKey]);
+  // Dedupe by place: a just-added zone (local copy) and its Firestore snapshot
+  // briefly coexist with different ids but identical coordinates.
+  const visibleZones = useMemo(() => {
+    const seen = new Set<string>();
+    return safeZones.filter((z) => {
+      const key = `${z.name}|${z.lat.toFixed(5)}|${z.lng.toFixed(5)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [safeZones]);
+  // Medical card shown in the modal (the member picked there).
+  const cardMember = memberRows.find((m) => m.id === emergencyCardFor) ?? null;
+  const shownCard = cardMember?.emergencyCard ?? null;
+  const isMyCard = emergencyCardFor === myMemberKey;
   const isElder = view === "elder";
   const t = ELDER_TEXT[lang];
 
@@ -1393,7 +1723,7 @@ export default function Page() {
                   {t.autoAlerts}
                 </span>
                 <span className="rounded-full bg-white px-3 py-1.5 text-sm font-bold text-slate-700 shadow-sm">
-                  {t.locationOn}
+                  {position || !isFirebaseConfigured() ? t.locationOn : t.locationOff}
                 </span>
               </div>
               <p className="mt-3 text-sm font-semibold text-emerald-700">{t.statusLocal}</p>
@@ -1435,7 +1765,14 @@ export default function Page() {
               </span>
               <span>
                 <span className="block text-3xl font-extrabold">{t.callTitle}</span>
-                <span className="text-sm font-semibold opacity-90">{t.callSub}</span>
+                <span className="text-sm font-semibold opacity-90">
+                  {contacts.length > 0
+                    ? contacts
+                        .slice(0, 3)
+                        .map((c) => c.name)
+                        .join(" · ")
+                    : t.callSub}
+                </span>
               </span>
             </button>
 
@@ -1470,7 +1807,7 @@ export default function Page() {
             {/* Quick cards */}
             <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={() => setMedicalOpen(true)}
+                onClick={() => openEmergencyCard()}
                 className="flex min-h-24 flex-col items-center justify-center gap-1 rounded-3xl border-2 border-teal-200 bg-white p-3 text-center shadow-sm transition hover:border-teal-400 active:scale-[0.98]"
               >
                 <HeartPulse className="h-8 w-8 text-teal-600" aria-hidden />
@@ -1531,7 +1868,9 @@ export default function Page() {
 
             <footer className="rounded-3xl border border-slate-200 bg-white p-4 text-center shadow-sm">
               <p className="text-xs font-semibold text-slate-400">
-                Suraksha Circle MVP · demo data only
+                {isFirebaseConfigured()
+                  ? "Suraksha Circle · live circle data"
+                  : "Suraksha Circle MVP · demo data only"}
               </p>
               <p className="mt-1.5 text-xs font-bold text-slate-500">
                 <Link
@@ -1551,7 +1890,9 @@ export default function Page() {
             </footer>
 
             <p className="pt-2 text-center text-xs font-medium text-slate-400">
-              Suraksha Circle MVP · demo data only
+              {isFirebaseConfigured()
+                ? "Suraksha Circle · live circle data"
+                : "Suraksha Circle MVP · demo data only"}
             </p>
           </div>
         ) : (
@@ -1583,7 +1924,7 @@ export default function Page() {
                 Circle: {safe} safe · {travel} travelling · {attention} needs attention
               </p>
               <button
-                onClick={() => handleShare(checkinShareText(checkInTime))}
+                onClick={() => handleShare(checkinShareText(myName, checkInTime))}
                 className="mt-4 flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-white/20 text-sm font-extrabold text-white shadow-sm transition hover:bg-white/30 active:scale-[0.98]"
               >
                 <Share2 className="h-5 w-5" aria-hidden /> Share via WhatsApp / SMS
@@ -1752,7 +2093,7 @@ export default function Page() {
                   <span className="text-base font-extrabold">Trigger Family Emergency Cascade</span>
                 </button>
                 <button
-                  onClick={() => setMedicalOpen(true)}
+                  onClick={() => openEmergencyCard()}
                   className="flex min-h-16 w-full items-center gap-3 rounded-2xl border-2 border-teal-200 bg-teal-50 px-4 text-left shadow-sm transition hover:border-teal-400 active:scale-[0.98]"
                 >
                   <HeartPulse className="h-6 w-6 shrink-0 text-teal-700" aria-hidden />
@@ -1763,7 +2104,30 @@ export default function Page() {
               </div>
             </section>
 
-            {/* Push notification opt-in — family sees Mummy's alert settings */}
+            {/* Safe zones (geofences) of THIS circle — real zones in live mode,
+                demo zones only when Firebase isn't configured at all */}
+            <SafeZonesCard
+              zones={visibleZones}
+              position={position}
+              geoError={geoError}
+              members={zoneMembers}
+              demo={!isFirebaseConfigured()}
+              lang={lang}
+              onAdd={handleAddSafeZone}
+              onRemove={handleRemoveSafeZone}
+            />
+
+            {/* My phone number — the number this circle calls in an emergency */}
+            <PhoneNumberCard
+              circleId={activeCircleId}
+              uid={myUid}
+              initialPhone={myPhone}
+              lang={lang}
+              onSaved={handlePhoneSaved}
+              onStatusChange={showToast}
+            />
+
+            {/* Push notification opt-in for this device */}
             <PushNotificationToggle
               circleId={activeCircleId}
               elder={isElder}
@@ -1811,7 +2175,9 @@ export default function Page() {
 
             <footer className="rounded-3xl border border-slate-200 bg-white p-4 text-center shadow-sm">
               <p className="text-xs font-semibold text-slate-400">
-                Suraksha Circle MVP · demo data only
+                {isFirebaseConfigured()
+                  ? "Suraksha Circle · live circle data"
+                  : "Suraksha Circle MVP · demo data only"}
               </p>
               <p className="mt-1.5 text-xs font-bold text-slate-500">
                 <Link
@@ -1831,11 +2197,23 @@ export default function Page() {
             </footer>
 
             <p className="pb-2 text-center text-xs font-medium text-slate-400">
-              Suraksha Circle MVP · demo data only
+              {isFirebaseConfigured()
+                ? "Suraksha Circle · live circle data"
+                : "Suraksha Circle MVP · demo data only"}
             </p>
           </div>
         )}
       </main>
+
+      {/* Beta feedback — always attributed to the signed-in user */}
+      <FeedbackWidget
+        userId={myUid}
+        userName={myName}
+        userPhone={myPhone}
+        elder={isElder}
+        lang={lang}
+        activeView={view}
+      />
 
       {/* ===== Modals ===== */}
       <Modal
@@ -1895,7 +2273,7 @@ export default function Page() {
               <li>📍 Live location shared with the circle</li>
             </ul>
             <button
-              onClick={() => handleShare(SOS_SHARE_TEXT)}
+              onClick={() => handleShare(sosShareText(myName, alertLocation))}
               className="mt-5 flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl border-2 border-red-300 bg-white font-extrabold text-red-700 shadow-sm transition hover:bg-red-50 active:scale-[0.98]"
             >
               <Share2 className="h-5 w-5" aria-hidden /> Share via WhatsApp / SMS
@@ -1923,113 +2301,325 @@ export default function Page() {
         icon={<Phone className="h-6 w-6 text-sky-600" aria-hidden />}
       >
         <ul className="space-y-3">
-          {CONTACTS.map((c) => (
-            <li key={c.name}>
-              <a
-                href={c.tel}
-                onClick={() => showToast(`📞 Calling ${c.name}…`)}
-                className="flex min-h-16 items-center justify-between gap-3 rounded-2xl border border-slate-200 px-4 py-3 transition hover:border-emerald-400 hover:bg-emerald-50 active:scale-[0.98]"
-              >
-                <span>
-                  <span className="block text-base font-extrabold text-slate-900">{c.name}</span>
-                  <span className="text-sm font-semibold text-slate-500">{c.relation}</span>
-                </span>
-                <span className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-extrabold text-white">
-                  <Phone className="h-4 w-4" aria-hidden /> Call
-                </span>
-              </a>
+          {contacts.length === 0 ? (
+            <li className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500" role="status">
+              {lang === "hi"
+                ? "आपके घेरे में अभी कोई फ़ोन नंबर सेव नहीं है। डैशबोर्ड पर “मेरा फ़ोन नंबर” से अपना नंबर जोड़ें — और सदस्यों से भी जोड़ने को कहें।"
+                : "No phone numbers in your circle yet. Add yours under “My Phone Number” on the dashboard and ask each member to do the same."}
             </li>
-          ))}
+          ) : (
+            contacts.map((c) => (
+              <li key={c.id}>
+                <a
+                  href={c.tel}
+                  onClick={() => showToast(`📞 Calling ${c.name}…`)}
+                  className="flex min-h-16 items-center justify-between gap-3 rounded-2xl border border-slate-200 px-4 py-3 transition hover:border-emerald-400 hover:bg-emerald-50 active:scale-[0.98]"
+                >
+                  <span>
+                    <span className="block text-base font-extrabold text-slate-900">{c.name}</span>
+                    <span className="text-sm font-semibold text-slate-500">{c.relation}</span>
+                  </span>
+                  <span className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-extrabold text-white">
+                    <Phone className="h-4 w-4" aria-hidden /> Call
+                  </span>
+                </a>
+              </li>
+            ))
+          )}
         </ul>
       </Modal>
 
       <Modal
         open={medicalOpen}
-        onClose={() => setMedicalOpen(false)}
+        onClose={closeEmergencyCard}
         title="Medical Emergency Card"
         icon={<HeartPulse className="h-6 w-6 text-teal-600" aria-hidden />}
       >
         <div className="space-y-4">
-          <div className="rounded-2xl bg-teal-50 p-4">
-            <p className="text-base font-extrabold text-slate-900">{MEDICAL.name}</p>
-            <p className="text-sm font-semibold text-slate-500">
-              Age {MEDICAL.age} · Andheri West, Mumbai
-            </p>
+          {/* Every member's card lives on their OWN circle entry, so the
+              coordinator can open any family member's card from here. */}
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="Family member">
+            {memberRows.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                role="tab"
+                aria-selected={emergencyCardFor === m.id}
+                onClick={() => {
+                  setCardDraft(null);
+                  setEmergencyCardFor(m.id);
+                }}
+                className={`rounded-full border-2 px-3 py-1.5 text-xs font-extrabold transition ${
+                  emergencyCardFor === m.id
+                    ? "border-teal-600 bg-teal-600 text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-teal-400"
+                }`}
+              >
+                {m.emoji} {m.name}
+                {m.id === myMemberKey ? " (you)" : ""}
+              </button>
+            ))}
           </div>
-          <div className="flex items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4">
-            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-rose-600 text-xl font-black text-white">
-              {MEDICAL.bloodGroup}
-            </span>
-            <div>
-              <p className="text-sm font-bold uppercase tracking-wide text-rose-700">Blood Group</p>
-              <p className="text-sm font-semibold text-slate-600">
-                Show this card at the hospital reception
+
+          {cardDraft ? (
+            /* ---- Editor: only ever the caller's OWN card (rules enforce it) ---- */
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void saveEmergencyCard();
+              }}
+              className="space-y-3"
+            >
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                  Blood group
+                  <input
+                    value={cardDraft.bloodGroup}
+                    onChange={(e) => setCardField("bloodGroup", e.target.value)}
+                    placeholder="B+"
+                    className={CARD_INPUT}
+                  />
+                </label>
+                <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                  Age
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    max={120}
+                    value={cardDraft.age ?? ""}
+                    onChange={(e) =>
+                      setCardField("age", e.target.value === "" ? null : Number(e.target.value))
+                    }
+                    className={CARD_INPUT}
+                  />
+                </label>
+              </div>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Allergies (comma separated)
+                <textarea
+                  rows={2}
+                  value={cardDraft.allergies.join(", ")}
+                  onChange={(e) => setCardField("allergies", splitList(e.target.value))}
+                  placeholder="e.g. Penicillin, peanuts"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Conditions (comma separated)
+                <textarea
+                  rows={2}
+                  value={cardDraft.conditions.join(", ")}
+                  onChange={(e) => setCardField("conditions", splitList(e.target.value))}
+                  placeholder="Diabetes, high blood pressure"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Medicines (comma separated)
+                <textarea
+                  rows={2}
+                  value={cardDraft.medications.join(", ")}
+                  onChange={(e) => setCardField("medications", splitList(e.target.value))}
+                  placeholder="Metformin 500mg — after breakfast"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Preferred hospital
+                <input
+                  value={cardDraft.hospital}
+                  onChange={(e) => setCardField("hospital", e.target.value)}
+                  placeholder="e.g. Lilavati Hospital, Bandra West"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Doctor + number
+                <input
+                  value={cardDraft.doctor}
+                  onChange={(e) => setCardField("doctor", e.target.value)}
+                  placeholder="e.g. Dr. Rao — +91 98200 00000"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Insurance
+                <input
+                  value={cardDraft.insurance}
+                  onChange={(e) => setCardField("insurance", e.target.value)}
+                  placeholder="e.g. Star Health · Policy SH-4452-8890"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <label className="block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                Anything else a responder should know
+                <textarea
+                  rows={2}
+                  value={cardDraft.note}
+                  onChange={(e) => setCardField("note", e.target.value)}
+                  placeholder="Wears hearing aids, speaks Marathi"
+                  className={CARD_INPUT}
+                />
+              </label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCardDraft(null)}
+                  className="min-h-12 flex-1 rounded-2xl border-2 border-slate-200 text-sm font-extrabold text-slate-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingCard}
+                  className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-teal-600 text-sm font-extrabold text-white disabled:opacity-50"
+                >
+                  {savingCard ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4" aria-hidden />
+                  )}
+                  Save card
+                </button>
+              </div>
+              <p className="text-center text-xs font-medium text-slate-400">
+                Stored on your own circle entry — every member can read it in an emergency.
               </p>
-            </div>
-          </div>
-          <div>
-            <p className="flex items-center gap-1.5 text-sm font-extrabold uppercase tracking-wide text-slate-500">
-              <AlertTriangle className="h-4 w-4 text-amber-500" aria-hidden /> Allergies
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {MEDICAL.allergies.map((a) => (
-                <span key={a} className="rounded-full bg-amber-100 px-3 py-1 text-sm font-bold text-amber-800">
-                  {a}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div>
-            <p className="text-sm font-extrabold uppercase tracking-wide text-slate-500">Conditions</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {MEDICAL.conditions.map((c) => (
-                <span key={c} className="rounded-full bg-sky-100 px-3 py-1 text-sm font-bold text-sky-800">
-                  {c}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div>
-            <p className="flex items-center gap-1.5 text-sm font-extrabold uppercase tracking-wide text-slate-500">
-              <Pill className="h-4 w-4 text-teal-600" aria-hidden /> Current Medications
-            </p>
-            <ul className="mt-2 space-y-1 text-sm font-semibold text-slate-700">
-              {MEDICAL.medications.map((m) => (
-                <li key={m}>• {m}</li>
-              ))}
-            </ul>
-          </div>
-          <div className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-            <p>
-              🏥 Preferred hospital:{" "}
-              <span className="font-extrabold text-slate-900">{MEDICAL.hospital}</span>
-            </p>
-            <p className="mt-1">🩺 {MEDICAL.doctor}</p>
-            <p className="mt-1">💳 Insurance: {MEDICAL.insurance}</p>
-          </div>
-          <div>
-            <p className="text-sm font-extrabold uppercase tracking-wide text-slate-500">
-              Emergency Contacts
-            </p>
-            <ul className="mt-2 space-y-2">
-              {CONTACTS.map((c) => (
-                <li key={c.name}>
-                  <a
-                    href={c.tel}
-                    className="flex min-h-12 items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold text-slate-800 transition hover:border-emerald-400 hover:bg-emerald-50"
-                  >
-                    <span>
-                      {c.name} · {c.relation}
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-2xl bg-teal-50 p-4">
+                <p className="text-base font-extrabold text-slate-900">
+                  {cardMember?.name ?? "Family member"}
+                  {isMyCard ? " (you)" : ""}
+                </p>
+                <p className="text-sm font-semibold text-slate-500">
+                  {[
+                    shownCard && shownCard.age !== null ? `Age ${shownCard.age}` : null,
+                    cardMember?.location,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "No details yet"}
+                </p>
+              </div>
+              {!shownCard && (
+                <p
+                  className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500"
+                  role="status"
+                >
+                  {isMyCard
+                    ? "Your card is empty — add your details so the family can tell a doctor exactly what is needed."
+                    : `${cardMember?.name ?? "This member"} hasn’t saved a medical card yet.`}
+                </p>
+              )}
+              {shownCard && (
+                <>
+                  <div className="flex items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                    <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-rose-600 text-xl font-black text-white">
+                      {shownCard.bloodGroup || "—"}
                     </span>
-                    <span className="flex items-center gap-1 text-emerald-700">
-                      <Phone className="h-4 w-4" aria-hidden />
-                      {c.phone}
-                    </span>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </div>
+                    <div>
+                      <p className="text-sm font-bold uppercase tracking-wide text-rose-700">Blood Group</p>
+                      <p className="text-sm font-semibold text-slate-600">
+                        Show this card at the hospital reception
+                      </p>
+                    </div>
+                  </div>
+                  {shownCard.allergies.length > 0 && (
+                    <div>
+                      <p className="flex items-center gap-1.5 text-sm font-extrabold uppercase tracking-wide text-slate-500">
+                        <AlertTriangle className="h-4 w-4 text-amber-500" aria-hidden /> Allergies
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {shownCard.allergies.map((a) => (
+                          <span key={a} className="rounded-full bg-amber-100 px-3 py-1 text-sm font-bold text-amber-800">
+                            {a}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {shownCard.conditions.length > 0 && (
+                    <div>
+                      <p className="text-sm font-extrabold uppercase tracking-wide text-slate-500">Conditions</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {shownCard.conditions.map((c) => (
+                          <span key={c} className="rounded-full bg-sky-100 px-3 py-1 text-sm font-bold text-sky-800">
+                            {c}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {shownCard.medications.length > 0 && (
+                    <div>
+                      <p className="flex items-center gap-1.5 text-sm font-extrabold uppercase tracking-wide text-slate-500">
+                        <Pill className="h-4 w-4 text-teal-600" aria-hidden /> Current Medications
+                      </p>
+                      <ul className="mt-2 space-y-1 text-sm font-semibold text-slate-700">
+                        {shownCard.medications.map((m) => (
+                          <li key={m}>• {m}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              )}
+              {shownCard && (shownCard.hospital || shownCard.doctor || shownCard.insurance || shownCard.note) && (
+                <div className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+                  {shownCard.hospital && (
+                    <p>
+                      🏥 Preferred hospital:{" "}
+                      <span className="font-extrabold text-slate-900">{shownCard.hospital}</span>
+                    </p>
+                  )}
+                  {shownCard.doctor && <p className="mt-1">🩺 {shownCard.doctor}</p>}
+                  {shownCard.insurance && <p className="mt-1">💳 Insurance: {shownCard.insurance}</p>}
+                  {shownCard.note && <p className="mt-1">📝 {shownCard.note}</p>}
+                </div>
+              )}
+              <div>
+                <p className="text-sm font-extrabold uppercase tracking-wide text-slate-500">
+                  Emergency Contacts
+                </p>
+                {contacts.length === 0 ? (
+                  <p className="mt-2 rounded-xl bg-slate-50 p-3 text-sm font-semibold text-slate-500" role="status">
+                    No phone numbers in this circle yet — add yours under “My Phone Number”.
+                  </p>
+                ) : (
+                  <ul className="mt-2 space-y-2">
+                    {contacts.map((c) => (
+                      <li key={c.id}>
+                        <a
+                          href={c.tel}
+                          className="flex min-h-12 items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold text-slate-800 transition hover:border-emerald-400 hover:bg-emerald-50"
+                        >
+                          <span>
+                            {c.name} · {c.relation}
+                          </span>
+                          <span className="flex items-center gap-1 text-emerald-700">
+                            <Phone className="h-4 w-4" aria-hidden />
+                            {c.phone}
+                          </span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              {isMyCard && (
+                <button
+                  type="button"
+                  onClick={startEditEmergencyCard}
+                  className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-teal-600 font-extrabold text-white shadow transition hover:bg-teal-700 active:scale-[0.98]"
+                >
+                  <Pencil className="h-5 w-5" aria-hidden />
+                  {shownCard ? "Edit my card" : "Add my details"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </Modal>
 

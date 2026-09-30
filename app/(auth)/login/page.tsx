@@ -28,6 +28,7 @@ import {
   joinCircleByInviteCode,
 } from "@/lib/circle-membership";
 import { isFirebaseConfigured } from "@/lib/firebase";
+import { toE164 } from "@/lib/phone";
 import { ensureUserProfile } from "@/lib/user-profile";
 
 type Step = "phone" | "otp" | "circle";
@@ -72,20 +73,6 @@ const INPUT_CLASS =
   "mt-1.5 w-full rounded-2xl border-2 border-slate-200 bg-slate-50 px-4 py-3 text-base font-bold text-slate-900 outline-none transition focus:border-emerald-400 focus:bg-white";
 const PRIMARY_BUTTON_CLASS =
   "flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 text-base font-extrabold text-white shadow-md transition hover:bg-emerald-700 active:scale-[0.98] disabled:opacity-60";
-
-/** Normalizes entered digits to E.164 (+91 default for Indian mobiles). */
-function toE164(value: string): string | null {
-  const raw = value.trim();
-  const digits = raw.replace(/\D/g, "");
-  if (!digits) return null;
-  if (raw.startsWith("+")) {
-    return digits.length >= 10 && digits.length <= 15 ? `+${digits}` : null;
-  }
-  let national = digits;
-  if (national.length === 12 && national.startsWith("91")) national = national.slice(2);
-  if (national.length === 11 && national.startsWith("0")) national = national.slice(1);
-  return national.length === 10 ? `+91${national}` : null;
-}
 
 export default function LoginPage() {
   const router = useRouter();

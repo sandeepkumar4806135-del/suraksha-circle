@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -86,6 +87,35 @@ export interface CircleMember {
   invited: boolean;
   role: string;
   city: string;
+  /** Medical card the member saved on their own entry (null = none yet). */
+  emergencyCard: EmergencyCard | null;
+  /** Last position the member chose to share (null = not sharing). */
+  location: MemberLocation | null;
+}
+
+/** A member's own medical emergency card, stored on their circle entry. */
+export interface EmergencyCard {
+  bloodGroup: string;
+  age: number | null;
+  allergies: string[];
+  conditions: string[];
+  medications: string[];
+  hospital: string;
+  doctor: string;
+  insurance: string;
+  /** Anything a responder should know before treating (free text). */
+  note: string;
+}
+
+/**
+ * Last position a member published to their own circle entry
+ * (`circles/{id}.members.{uid}.location`) while live location sharing is on.
+ */
+export interface MemberLocation {
+  lat: number;
+  lng: number;
+  /** Epoch ms of the last publish (null while the server timestamp is pending). */
+  updatedAtMs: number | null;
 }
 
 /** What `subscribeToCircleMembers` emits for one circle document. */
@@ -124,6 +154,97 @@ function toMillis(value: unknown): number | null {
   return null;
 }
 
+/** Trims, caps and drops empty entries from a stored string list. */
+function toStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .map((entry) => entry.trim().slice(0, 120))
+    .slice(0, 20);
+}
+
+/** A blank emergency card — used to seed the card editor. */
+export function emptyEmergencyCard(): EmergencyCard {
+  return {
+    bloodGroup: "",
+    age: null,
+    allergies: [],
+    conditions: [],
+    medications: [],
+    hospital: "",
+    doctor: "",
+    insurance: "",
+    note: "",
+  };
+}
+
+/** True when the card carries no information at all (nothing worth saving). */
+export function isEmergencyCardEmpty(card: EmergencyCard): boolean {
+  return (
+    !card.bloodGroup.trim() &&
+    card.age === null &&
+    !card.note.trim() &&
+    !card.hospital.trim() &&
+    !card.doctor.trim() &&
+    !card.insurance.trim() &&
+    card.allergies.length === 0 &&
+    card.conditions.length === 0 &&
+    card.medications.length === 0
+  );
+}
+
+/**
+ * Normalizes a stored emergency card. Returns null when the member has no card
+ * (or it holds no information) so callers can render an empty state instead of
+ * a card full of blanks.
+ */
+export function normalizeEmergencyCard(value: unknown): EmergencyCard | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const age = typeof raw.age === "number" && Number.isFinite(raw.age) ? Math.round(raw.age) : null;
+  const card: EmergencyCard = {
+    bloodGroup: typeof raw.bloodGroup === "string" ? raw.bloodGroup.trim() : "",
+    age,
+    allergies: toStringList(raw.allergies),
+    conditions: toStringList(raw.conditions),
+    medications: toStringList(raw.medications),
+    hospital: typeof raw.hospital === "string" ? raw.hospital.trim() : "",
+    doctor: typeof raw.doctor === "string" ? raw.doctor.trim() : "",
+    insurance: typeof raw.insurance === "string" ? raw.insurance.trim() : "",
+    note: typeof raw.note === "string" ? raw.note.trim() : "",
+  };
+  return isEmergencyCardEmpty(card) ? null : card;
+}
+
+/**
+ * Normalizes a stored shared location. Returns null when the member isn't
+ * sharing (missing, malformed, or the 0,0 "null island" placeholder).
+ */
+function normalizeLocation(value: unknown): MemberLocation | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const lat = Number(raw.lat);
+  const lng = Number(raw.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if ((lat === 0 && lng === 0) || lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng, updatedAtMs: toMillis(raw.updatedAt) };
+}
+
+/** Shape actually written to Firestore (field-capped, no empty noise). */
+function toStoredCard(card: EmergencyCard): Record<string, unknown> {
+  return {
+    bloodGroup: card.bloodGroup.trim().slice(0, 8),
+    age: card.age,
+    allergies: toStringList(card.allergies),
+    conditions: toStringList(card.conditions),
+    medications: toStringList(card.medications),
+    hospital: card.hospital.trim().slice(0, 200),
+    doctor: card.doctor.trim().slice(0, 200),
+    insurance: card.insurance.trim().slice(0, 200),
+    note: card.note.trim().slice(0, 500),
+  };
+}
+
 /** Normalizes one raw members-map entry (never throws on unknown shapes). */
 export function normalizeCircleMember(uid: string, data: DocumentData | undefined): CircleMember {
   const raw = (data ?? {}) as Record<string, unknown>;
@@ -141,6 +262,8 @@ export function normalizeCircleMember(uid: string, data: DocumentData | undefine
     invited: uid.startsWith("invited-") || raw.invited === true,
     role: typeof raw.role === "string" ? raw.role : "",
     city: typeof raw.city === "string" ? raw.city : "",
+    emergencyCard: normalizeEmergencyCard(raw.emergencyCard),
+    location: normalizeLocation(raw.location),
   };
 }
 
@@ -464,6 +587,77 @@ export async function setMemberStatus(
     return true;
   } catch (err) {
     console.warn("[Suraksha Circle] Status write failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Stores the caller's own phone on `members.{uid}.phone` so the circle can call
+ * them in an emergency. The rules only allow writes to the caller's OWN member
+ * entry, so this can never rewrite somebody else's number.
+ */
+export async function updateMemberPhone(
+  circleId: string,
+  uid: string,
+  phone: string
+): Promise<boolean> {
+  const db = getDb();
+  if (!db || !circleId || !uid) return false;
+  const clean = phone.trim().slice(0, 32);
+  if (!/^\+?\d{8,15}$/.test(clean)) return false;
+  try {
+    await updateDoc(doc(db, "circles", circleId), { [`members.${uid}.phone`]: clean });
+    return true;
+  } catch (err) {
+    console.warn("[Suraksha Circle] Phone write failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Saves the caller's own medical emergency card on their member entry, where
+ * everyone in the circle can read it during an emergency (the users/{uid}
+ * profile document is owner-only readable, so the card cannot live there).
+ */
+export async function saveMemberEmergencyCard(
+  circleId: string,
+  uid: string,
+  card: EmergencyCard
+): Promise<boolean> {
+  const db = getDb();
+  if (!db || !circleId || !uid || isEmergencyCardEmpty(card)) return false;
+  try {
+    await updateDoc(doc(db, "circles", circleId), {
+      [`members.${uid}.emergencyCard`]: toStoredCard(card),
+    });
+    return true;
+  } catch (err) {
+    console.warn("[Suraksha Circle] Emergency card write failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Publishes — or clears — the caller's own shared position. Passing null stores
+ * a delete sentinel, so switching location sharing off really removes the pin
+ * instead of leaving a stale one behind.
+ */
+export async function setMemberLocationShare(
+  circleId: string,
+  uid: string,
+  location: { lat: number; lng: number } | null
+): Promise<boolean> {
+  const db = getDb();
+  if (!db || !circleId || !uid) return false;
+  try {
+    await updateDoc(doc(db, "circles", circleId), {
+      [`members.${uid}.location`]: location
+        ? { lat: location.lat, lng: location.lng, updatedAt: serverTimestamp() }
+        : deleteField(),
+    });
+    return true;
+  } catch (err) {
+    console.warn("[Suraksha Circle] Location share write failed:", err);
     return false;
   }
 }

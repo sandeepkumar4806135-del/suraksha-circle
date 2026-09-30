@@ -33,6 +33,19 @@ export interface GeoPosition {
   accuracyM?: number;
 }
 
+/**
+ * Another member's last shared position — drives the "who is inside this zone"
+ * badges. Coordinates come from `circles/{id}.members.{uid}.location`, never
+ * from fixtures, and only while that member shares their location.
+ */
+export interface SafeZoneMember {
+  uid: string;
+  label: string;
+  emoji: string;
+  lat: number;
+  lng: number;
+}
+
 // ---------------------------------------------------------------------------
 // Distance / boundary math (haversine — fine for <100 km ranges)
 // ---------------------------------------------------------------------------

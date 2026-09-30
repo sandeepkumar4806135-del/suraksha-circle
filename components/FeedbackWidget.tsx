@@ -4,7 +4,27 @@ import { useState } from "react";
 import { MessageSquareHeart, Send, X } from "lucide-react";
 import { submitBetaFeedback, type FeedbackCategory } from "@/lib/beta-feedback";
 
-export default function FeedbackWidget({ elder, lang, activeView }: { elder?: boolean; lang?: "en" | "hi"; activeView: string }) {
+interface FeedbackWidgetProps {
+  /** Signed-in user id — feedback is attributed to a real account, not a fixture. */
+  userId: string;
+  /** Display name shown in the beta review sheet. */
+  userName: string;
+  /** Optional phone; only stored when the tester already shared one. */
+  userPhone?: string;
+  elder?: boolean;
+  lang?: "en" | "hi";
+  /** View the widget was opened from ("elder" | "family"). */
+  activeView: string;
+}
+
+export default function FeedbackWidget({
+  userId,
+  userName,
+  userPhone = "",
+  elder = false,
+  lang = "en",
+  activeView,
+}: FeedbackWidgetProps) {
   const hi = lang === "hi";
   const [open, setOpen] = useState(false);
   const [category, setCategory] = useState<FeedbackCategory>("general");
@@ -21,10 +41,19 @@ export default function FeedbackWidget({ elder, lang, activeView }: { elder?: bo
   };
   async function submit() {
     const text = message.trim();
-    if (text.length < 5 || sending) return;
+    // No account, no submission: every piece of feedback is attributable.
+    if (text.length < 5 || sending || !userId) return;
     setSending(true);
     const deviceType = typeof window !== "undefined" && window.innerWidth < 640 ? "mobile" : "desktop";
-    await submitBetaFeedback({ userId: "beta-tester", userName: activeView === "elder" ? "Mummy" : "Rahul", category, message: text, activeView, deviceType });
+    await submitBetaFeedback({
+      userId,
+      userName: userName || "Family member",
+      userPhone,
+      category,
+      message: text,
+      activeView,
+      deviceType,
+    });
     setSending(false);
     setDone(true);
     setMessage("");
@@ -32,7 +61,7 @@ export default function FeedbackWidget({ elder, lang, activeView }: { elder?: bo
   }
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} aria-label={t.label} className="fixed bottom-20 right-4 z-40 flex min-h-12 items-center gap-2 rounded-full bg-emerald-600 px-4 text-sm font-extrabold text-white shadow-xl hover:bg-emerald-700 sm:bottom-6 sm:right-6">
+      <button type="button" onClick={() => setOpen(true)} aria-label={t.label} className={`fixed right-4 z-40 flex items-center gap-2 rounded-full bg-emerald-600 font-extrabold text-white shadow-xl hover:bg-emerald-700 sm:bottom-6 sm:right-6 ${elder ? "bottom-24 min-h-14 px-5 text-base" : "bottom-20 min-h-12 px-4 text-sm"}`}>
         <MessageSquareHeart aria-hidden className="h-5 w-5" />
         {t.label}
       </button>
@@ -72,7 +101,6 @@ export default function FeedbackWidget({ elder, lang, activeView }: { elder?: bo
           </div>
         </div>
       )}
-      {elder ? <span className="hidden" /> : null}
     </>
   );
 }

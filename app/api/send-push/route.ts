@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { verifyIdToken } from "@/lib/auth-server";
 import {
   dispatchSosPush,
   isFcmConfigured,
@@ -21,8 +22,26 @@ interface SendPushBody {
  * the circle (circles/{circleId}/push_tokens in Firestore). When FCM service
  * account credentials are absent the handler runs in simulation mode (structured
  * console preview) and still returns 200 so the emergency flow is never blocked.
+ *
+ * Auth: a valid Firebase ID token is required whenever the project is
+ * configured (lib/auth-server), so strangers cannot fan-out alerts to a
+ * circle they do not belong to.
  */
 export async function POST(req: Request) {
+  // --- Auth (before parsing anything the caller sent) -------------------
+  const auth = await verifyIdToken(req);
+  if (!auth.ok) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        service: "suraksha-push",
+        event: "rejected",
+        reason: auth.reason,
+      })
+    );
+    return NextResponse.json({ error: "Sign in required to send alerts" }, { status: 401 });
+  }
+
   let json: SendPushBody;
   try {
     json = (await req.json()) as SendPushBody;

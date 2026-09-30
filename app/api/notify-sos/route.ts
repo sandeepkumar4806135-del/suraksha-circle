@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { verifyIdToken } from "@/lib/auth-server";
 import {
   buildSosMessage,
   dispatchSosAlert,
@@ -10,6 +11,7 @@ export const runtime = "nodejs";
 
 interface NotifySosBody {
   circleId?: unknown;
+  raisedBy?: unknown;
   raisedByName?: unknown;
   location?: unknown;
   note?: unknown;
@@ -22,8 +24,25 @@ interface NotifySosBody {
  * messages to the listed recipients via Twilio. When Twilio credentials are
  * absent the handler runs in simulation mode (structured console preview) and
  * still returns 200 so the client's emergency flow is never blocked.
+ *
+ * Auth: real SMS costs money and rings real phones, so a valid Firebase ID
+ * token is required whenever the project is configured (lib/auth-server).
  */
 export async function POST(req: Request) {
+  // --- Auth (before parsing anything the caller sent) -------------------
+  const auth = await verifyIdToken(req);
+  if (!auth.ok) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        service: "suraksha-notify-sos",
+        event: "rejected",
+        reason: auth.reason,
+      })
+    );
+    return NextResponse.json({ error: "Sign in required to send SOS alerts" }, { status: 401 });
+  }
+
   let body: NotifySosBody;
   try {
     body = (await req.json()) as NotifySosBody;
@@ -31,7 +50,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { circleId, raisedByName, location, note, recipients } = body;
+  const { circleId, raisedBy, raisedByName, location, note, recipients } = body;
+
+  // A signed-in caller may only raise alerts as themselves: the recipient gets
+  // the raiser's name in the SMS, so a spoofed uid is rejected outright.
+  if (typeof raisedBy === "string" && auth.uid && raisedBy !== auth.uid) {
+    return NextResponse.json({ error: "raisedBy must match the signed-in user" }, { status: 403 });
+  }
 
   // --- Validation ------------------------------------------------------
   if (typeof circleId !== "string" || circleId.length === 0) {

@@ -7,6 +7,7 @@ import {
   isInsideZone,
   type GeoPosition,
   type SafeZone,
+  type SafeZoneMember,
 } from "@/lib/safe-zones";
 
 interface SafeZonesCardProps {
@@ -14,23 +15,29 @@ interface SafeZonesCardProps {
   /** Live device position from useGeofenceWatcher (null until permitted). */
   position: GeoPosition | null;
   geoError: string | null;
+  /**
+   * Other members' last shared positions (empty when nobody shares). Only the
+   * caller's own component decides what to pass here — in demo mode it passes
+   * fixture positions, in live mode the real `members.{uid}.location` values.
+   */
+  members: SafeZoneMember[];
+  /** Offline demo mode: fall back to fixture coordinates for "You". */
+  demo?: boolean;
   elder?: boolean;
   lang?: "en" | "hi";
   onAdd: (zone: { name: string; emoji: string; lat: number; lng: number; radiusM: number }) => void;
   onRemove: (zone: SafeZone) => void;
 }
 
-/** Demo member fixtures (Andheri West) — replace with live presence later. */
-const MEMBER_FIXTURES = [
-  { name: "Mummy", emoji: "👩", lat: 19.1362, lng: 72.8301 },
-  { name: "Papa", emoji: "👨", lat: 19.1136, lng: 72.8697 },
-  { name: "Brother", emoji: "🧑", lat: 19.1345, lng: 72.8165 },
-];
+/** Demo-mode anchor — the only place a fixture coordinate is still allowed. */
+const DEMO_SELF: GeoPosition = { lat: 19.1364, lng: 72.8296 };
 
 export default function SafeZonesCard({
   zones,
   position,
   geoError,
+  members,
+  demo = false,
   elder = false,
   lang = "en",
   onAdd,
@@ -39,6 +46,7 @@ export default function SafeZonesCard({
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [radiusM, setRadiusM] = useState(200);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const hi = lang === "hi";
   const t = {
@@ -57,16 +65,29 @@ export default function SafeZonesCard({
     radius: hi ? "त्रिज्या" : "Radius",
     empty: hi ? "कोई सुरक्षित क्षेत्र नहीं — एक जोड़ें!" : "No safe zones yet — add one!",
     meters: hi ? "मीटर" : "m",
+    needLocation: hi
+      ? "मौजूदा जगह पर ज़ोन जोड़ने के लिए लोकेशन की अनुमति दें"
+      : "Allow location access to add a zone at your current spot",
+    waiting: hi ? "इस डिवाइस की लोकेशन का इंतज़ार…" : "Waiting for this device’s location…",
+    noPresence: hi
+      ? "अभी और कोई लाइव लोकेशन साझा नहीं कर रहा है"
+      : "No one else is sharing their location right now",
   };
 
-  // "You" badge position: live GPS when available, else demo anchor.
-  const selfPos: GeoPosition | null = position ?? (geoError ? { lat: 19.1364, lng: 72.8296 } : null);
+  // "You" badge position: live GPS when available, else the offline demo anchor.
+  const selfPos: GeoPosition | null = position ?? (demo ? DEMO_SELF : null);
 
   const zoneIcon = (z: SafeZone) =>
     z.emoji === "🏫" ? School : z.emoji === "🏠" ? Home : MapPin;
 
   const handleAdd = () => {
-    const anchor = position ?? { lat: 19.1364, lng: 72.8296 };
+    // A live zone is anchored where the user really is: never invent a
+    // coordinate in live mode, ask for the location permission instead.
+    const anchor = position ?? (demo ? DEMO_SELF : null);
+    if (!anchor) {
+      setFormError(t.needLocation);
+      return;
+    }
     onAdd({
       name: name.trim() || "New Safe Zone",
       emoji: name.includes("School") ? "🏫" : "🏠",
@@ -76,6 +97,7 @@ export default function SafeZonesCard({
     });
     setName("");
     setRadiusM(200);
+    setFormError(null);
     setAdding(false);
   };
 
@@ -95,7 +117,10 @@ export default function SafeZonesCard({
         </div>
         <button
           type="button"
-          onClick={() => setAdding((a) => !a)}
+          onClick={() => {
+            setFormError(null);
+            setAdding((a) => !a);
+          }}
           aria-expanded={adding}
           aria-label={t.add}
           className={`flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-600 font-extrabold text-white shadow transition hover:bg-emerald-700 active:scale-95 ${
@@ -147,6 +172,14 @@ export default function SafeZonesCard({
             <Navigation aria-hidden className="h-5 w-5" />
             {t.add}
           </button>
+          {formError && (
+            <p
+              className="rounded-xl bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800"
+              role="status"
+            >
+              ⚠️ {formError}
+            </p>
+          )}
         </div>
       )}
 
@@ -200,16 +233,16 @@ export default function SafeZonesCard({
                         elder={elder}
                       />
                     )}
-                    {MEMBER_FIXTURES.map((m) => {
+                    {members.map((m) => {
                       const inside = isInsideZone(m, z);
                       const isHome = z.emoji === "🏠" && inside;
                       return (
                         <PresenceBadge
-                          key={m.name}
+                          key={m.uid}
                           label={
                             isHome
                               ? `${m.emoji} ${t.safeAtHome}`
-                              : `${m.emoji} ${inside ? t.inside(m.name) : t.outside(m.name)}`
+                              : `${m.emoji} ${inside ? t.inside(m.label) : t.outside(m.label)}`
                           }
                           inside={inside}
                           elder={elder}
@@ -238,6 +271,19 @@ export default function SafeZonesCard({
         >
           ⚠️ {geoError}
         </p>
+      )}
+
+      {!geoError && !position && !demo && (
+        <p
+          className="mt-2.5 rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-500"
+          role="status"
+        >
+          📍 {t.waiting}
+        </p>
+      )}
+
+      {members.length === 0 && zones.length > 0 && (
+        <p className="mt-2 px-1 text-xs font-semibold text-slate-400">👥 {t.noPresence}</p>
       )}
     </section>
   );
